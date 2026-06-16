@@ -1,0 +1,62 @@
+name: Dev Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore SourcePorter.sln
+
+      - name: Build
+        run: dotnet build SourcePorter.sln -c Release --no-restore
+
+      - name: Test
+        run: dotnet test SourcePorter.sln -c Release --no-build --no-restore
+
+      - name: Publish
+        run: |
+          dotnet publish src/SourcePorter.App/SourcePorter.App.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugType=embedded `
+            --no-restore `
+            -o artifacts/publish
+
+      - name: Zip artifact
+        run: Compress-Archive -Path artifacts/publish/* -DestinationPath artifacts/SourcePorter-v0.1.0-win-x64.zip
+
+      - name: Delete existing dev release
+        run: gh release delete dev --yes --cleanup-tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Create dev release
+        run: |
+          gh release create dev artifacts/SourcePorter-v0.1.0-win-x64.zip `
+            --title "SourcePorter v0.1.0 (dev)" `
+            --notes "Latest development build from \`main\`. Not a stable release." `
+            --prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -34,7 +34,7 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "SourcePorter — Source 1 → Source 2 Map Porter";
+        Text = "Source Porter";
         Icon = LoadAppIcon();
         MinimumSize = new Size(820, 560);
         Size = new Size(1040, 700);
@@ -432,6 +432,7 @@ public sealed class MainForm : Form
     private void WireSettingsPersistence()
     {
         _cs2Dir.Leave += (_, _) => SaveSettings();
+        _sourceMap.TextChanged += (_, _) => UpdateTitle();
         _sourceMap.Leave += (_, _) => SaveSettings();
         _outputAddon.Leave += (_, _) => SaveSettings();
         _useBsp.CheckedChanged += (_, _) => SaveSettings();
@@ -444,6 +445,14 @@ public sealed class MainForm : Form
 
     private void SaveSettings() => CaptureSettings().Save();
 
+    private void UpdateTitle()
+    {
+        var path = _sourceMap.Text.Trim();
+        Text = path.Length > 0
+            ? $"Source Porter [{Path.GetFileName(path)}]"
+            : "Source Porter";
+    }
+
     private void ApplySettingsToUi()
     {
         _cs2Dir.Text = _settings.Cs2Directory;
@@ -455,6 +464,7 @@ public sealed class MainForm : Form
         _compileMap.Checked = _settings.CompileMap;
         _inputMode.SelectedItem = _inputMode.Items.Contains(_settings.InputMode) ? _settings.InputMode : "VMF";
         _threads.Value = Math.Clamp(_settings.Threads, (int)_threads.Minimum, (int)_threads.Maximum);
+        UpdateTitle();
     }
 
     private AppSettings CaptureSettings() => new()
