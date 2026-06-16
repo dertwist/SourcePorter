@@ -53,7 +53,7 @@ jobs:
 
       - name: Create dev release
         run: |
-          gh release create dev artifacts/publish/SourcePorter.App.exe `
+          gh release create dev artifacts/publish/SourcePorter.exe `
             --title "SourcePorter v0.1.0 (dev)" `
             --notes "Latest development build from ``main``. Not a stable release." `
             --prerelease
