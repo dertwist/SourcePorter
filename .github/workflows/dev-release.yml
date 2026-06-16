@@ -46,7 +46,7 @@ jobs:
             -o artifacts/publish
 
       - name: Delete existing dev release
-        run: gh release delete dev --yes --cleanup-tag
+        run: gh release delete dev --yes --cleanup-tag || Write-Host "No existing dev release to delete."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true

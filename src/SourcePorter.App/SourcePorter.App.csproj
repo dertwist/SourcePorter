@@ -5,6 +5,13 @@
     <TargetFramework>net9.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>SourcePorter.App</RootNamespace>
+    <!--
+      Ship the executable as SourcePorter.exe (not SourcePorter.App.exe): the dev
+      release asset and the README download badge both reference SourcePorter.exe.
+      RootNamespace stays SourcePorter.App so embedded-resource logical names are
+      unchanged.
+    -->
+    <AssemblyName>SourcePorter</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- Source-2-flavored app icon, rasterised from app.svg; regen steps in ARCHITECTURE.md §9. -->
     <ApplicationIcon>app.ico</ApplicationIcon>

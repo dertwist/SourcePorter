@@ -6,7 +6,7 @@
       "type": "coreclr",
       "request": "launch",
       "preLaunchTask": "build",
-      "program": "${workspaceFolder}/src/SourcePorter.App/bin/Debug/net9.0-windows/SourcePorter.App.dll",
+      "program": "${workspaceFolder}/src/SourcePorter.App/bin/Debug/net9.0-windows/SourcePorter.dll",
       "cwd": "${workspaceFolder}/src/SourcePorter.App",
       "console": "internalConsole",
       "stopAtEntry": false
