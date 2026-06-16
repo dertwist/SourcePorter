@@ -45,14 +45,6 @@
       "problemMatcher": "$msCompile"
     },
     {
-      "label": "restore",
-      "detail": "Restore NuGet packages",
-      "command": "dotnet",
-      "type": "process",
-      "args": ["restore", "${workspaceFolder}/SourcePorter.sln"],
-      "problemMatcher": "$msCompile"
-    },
-    {
       "label": "clean",
       "detail": "Remove build output",
       "command": "dotnet",
@@ -91,7 +83,7 @@
     },
     {
       "label": "publish",
-      "detail": "Self-contained single-file Release build for win-x64",
+      "detail": "Single portable exe — self-contained win-x64 Release build",
       "command": "dotnet",
       "type": "process",
       "args": [
@@ -104,6 +96,8 @@
         "--self-contained",
         "true",
         "-p:PublishSingleFile=true",
+        "-p:IncludeNativeLibrariesForSelfExtract=true",
+        "-p:DebugType=embedded",
         "-o",
         "${workspaceFolder}/artifacts/publish"
       ],

@@ -255,12 +255,19 @@ public sealed class MainForm : Form
         _cts = new CancellationTokenSource();
         try
         {
-            // BSP input: decompile to a .vmf next to it first, then import that.
+            // BSP input: decompile to a .vmf then import that.
             var vmf = source;
             if (bspMode)
             {
-                vmf = Path.ChangeExtension(source, ".vmf");
-                AppendConsole($"Decompiling {Path.GetFileName(source)} → {Path.GetFileName(vmf)}…", muted);
+                // TryParseSourceMap requires \maps\ in the path. If the BSP already sits under
+                // a maps\ folder, keep it in place; otherwise output to <bsp-dir>\maps\<name>.vmf.
+                var candidateVmf = Path.ChangeExtension(source, ".vmf");
+                vmf = Cs2Install.TryParseSourceMap(candidateVmf, out _, out _)
+                    ? candidateVmf
+                    : Path.Combine(Path.GetDirectoryName(source)!, "maps",
+                                   Path.GetFileNameWithoutExtension(source) + ".vmf");
+
+                AppendConsole($"Decompiling {Path.GetFileName(source)} → {vmf}…", muted);
                 var decompiler = new BspDecompiler(runner);
                 decompiler.OnLog += LogFromWorker;
                 try { await Task.Run(() => decompiler.DecompileAsync(source, vmf, _cts.Token)); }
