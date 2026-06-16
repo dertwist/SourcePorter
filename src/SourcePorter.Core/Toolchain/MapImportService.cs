@@ -54,6 +54,18 @@ public sealed partial class MapImportService
         // VALVE_NO_AUTO_P4=1 so the p4 libs run disconnected (utlc.SaveEnv).
         var env = new Dictionary<string, string> { ["VALVE_NO_AUTO_P4"] = "1" };
 
+        // Guide §-1.1: disable vpk.signatures for the run (restored on dispose) so
+        // source1import can read the CS:GO pak01.vpk.
+        using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures);
+        if (signatures.Applied)
+            OnLog?.Invoke("Disabled vpk.signatures for this import (guide -1.1); will restore afterwards.");
+
+        // Heads-up: -usebsp passes the content path to vbsp unquoted; spaces in the
+        // install path (e.g. "Counter-Strike Global Offensive") break it and it
+        // falls back to vmf-only geo. Warn rather than fail.
+        if (project.Import.UseBsp && s1Content.Contains(' '))
+            OnLog?.Invoke("WARNING: -usebsp will likely fail (space in content path) and fall back to vmf-only geometry.");
+
         // --- import vmf -> vmap (built once with the ORIGINAL map name, reused for the re-import) ---
         var importArgs = BuildMapImportArgs(project, s1Game, s1Content, addon, originalMapName);
         await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct);
@@ -63,17 +75,33 @@ public sealed partial class MapImportService
 
         if (!project.Import.SkipDeps)
         {
-            // We strip out models as they go through the new importer last.
-            StripMdlsFromRefs(paths.PrefabRefs);
+            // Use whichever refs file source1import actually wrote (_prefab_refs.txt
+            // when -usebsp merged instances, else plain _refs.txt) and derive the
+            // mdl/new-refs names from the SAME base so the steps line up.
+            var refsFile = paths.ResolveRefsFile();
+            if (refsFile is null)
+            {
+                OnLog?.Invoke("WARNING: source1import produced no refs file — dependencies (materials/models) were not imported.");
+            }
+            else
+            {
+                OnLog?.Invoke($"Importing dependencies from {Path.GetFileName(refsFile)}");
 
-            // now import mdls (as modeldoc), and their materials
-            await ImportAndCompileMapMdlsAsync(paths.PrefabMdlList, paths, s1Game, addon, env, ct);
+                // We strip out models as they go through the new importer last.
+                StripMdlsFromRefs(refsFile);
 
-            // import refs (excluding mdls)
-            await ImportAndCompileMapRefsAsync(paths.PrefabNewRefs, paths, s1Game, addon, env, ct);
+                var mdlList = refsFile.Replace("_refs.txt", "_mdl_lst.txt");
+                var newRefs = refsFile.Replace("_refs.txt", "_new_refs.txt");
 
-            // quick import vmf again, now that dependencies (materials especially) are compiled
-            await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct);
+                // now import mdls (as modeldoc), and their materials
+                await ImportAndCompileMapMdlsAsync(mdlList, paths, s1Game, addon, env, ct);
+
+                // import refs (excluding mdls)
+                await ImportAndCompileMapRefsAsync(newRefs, paths, s1Game, addon, env, ct);
+
+                // quick import vmf again, now that dependencies (materials especially) are compiled
+                await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct);
+            }
         }
 
         // explicit copy of main .vmap to game maps if not already there (it can only be compiled from there)
@@ -81,6 +109,37 @@ public sealed partial class MapImportService
         {
             Directory.CreateDirectory(Path.GetDirectoryName(paths.ContentMainVmap)!);
             File.Copy(paths.ImportedMainVmap, paths.ContentMainVmap, overwrite: true);
+        }
+    }
+
+    /// <summary>
+    /// Compiles the imported main <c>.vmap</c> to <c>.vmap_c</c> via resourcecompiler
+    /// so it can be validated/loaded. The Python importer leaves this to Hammer;
+    /// we do it explicitly. Returns true on success (non-throwing).
+    /// </summary>
+    public async Task<bool> CompileMapAsync(PortProject project, CancellationToken ct = default)
+    {
+        using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures);
+        var paths = new ImportPaths(project.S2GameInfoDir, project.AddonName, project.MapName);
+        var vmap = paths.ContentMainVmap;
+        if (!File.Exists(vmap))
+        {
+            OnLog?.Invoke($"No imported .vmap to compile at {vmap}");
+            return false;
+        }
+
+        var env = new Dictionary<string, string> { ["VALVE_NO_AUTO_P4"] = "1" };
+        try
+        {
+            OnLog?.Invoke($"Compiling map {Path.GetFileName(vmap)} -> .vmap_c");
+            await RunAsync(_tools.ResourceCompiler, "resourcecompiler.exe",
+                $"-retail -nop4 -game csgo \"{vmap}\"", env, ct);
+            return true;
+        }
+        catch (ImportToolException ex)
+        {
+            OnLog?.Invoke($"Map compile failed: {ex.Message}");
+            return false;
         }
     }
 
@@ -141,7 +200,7 @@ public sealed partial class MapImportService
             var refsName = Path.Combine(s2Content, mdlFile.Replace(".mdl", "_refs.txt"));
 
             var importArgs = $"-nop4 {extraOptions} -i \"{s1Game}\" -o \"{s2Content}\" \"{mdlFile}\"".Replace("  ", " ");
-            await RunAsync(_tools.ModelImporter, "cs_mdl_import.exe", importArgs, env, ct);
+            await RunAsync(_tools.ModelImporter, "cs_mdl_import.exe", importArgs, env, ct, critical: false);
 
             if (File.Exists(refsName))
             {
@@ -157,7 +216,7 @@ public sealed partial class MapImportService
         File.WriteAllText(mtlListPath, RefsFile.RefsStringFromList(mdlMtls));
 
         var importRefsArgs = $"-retail -nop4 -nop4sync -src1gameinfodir \"{s1Game}\" -s2addon {addon} -game csgo -usefilelist \"{mtlListPath}\"";
-        await RunAsync(_tools.Source1Import, "source1import.exe", importRefsArgs, env, ct);
+        await RunAsync(_tools.Source1Import, "source1import.exe", importRefsArgs, env, ct, critical: false);
 
         // Load the global list of materials we've already forced UV2 on, and re-apply the flag.
         var global2Uv = new HashSet<string>(StringComparer.Ordinal);
@@ -180,7 +239,7 @@ public sealed partial class MapImportService
 
             var vmat = Path.Combine(s2Content, mtl.Replace('/', '\\').Replace(".vmt", ".vmat"));
             await RunAsync(_tools.ResourceCompiler, "resourcecompiler.exe",
-                $"-retail -nop4 -game csgo \"{vmat}\"", env, ct);
+                $"-retail -nop4 -game csgo \"{vmat}\"", env, ct, critical: false);
         }
 
         // Compile models, force-compiling those whose materials need UV2.
@@ -199,7 +258,7 @@ public sealed partial class MapImportService
 
             var f = force ? "-f " : "";
             await RunAsync(_tools.ResourceCompiler, "resourcecompiler.exe",
-                $"-retail -nop4 {f}-game csgo \"{vmdl}\"", env, ct);
+                $"-retail -nop4 {f}-game csgo \"{vmdl}\"", env, ct, critical: false);
         }
     }
 
@@ -212,7 +271,7 @@ public sealed partial class MapImportService
             return;
 
         var importArgs = $"-retail -nop4 -nop4sync -src1gameinfodir \"{s1Game}\" -s2addon {addon} -game csgo -usefilelist \"{refsFile}\"";
-        await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct);
+        await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct, critical: false);
 
         var s2Content = paths.S2ContentCsgoImported;
         var flat = RefsFile.ListStringFromRefs(RefsFile.ReadTextFile(refsFile)).Split('\n');
@@ -226,12 +285,12 @@ public sealed partial class MapImportService
             sb.Append(Path.Combine(s2Content, line.Replace('/', '\\'))).Append('\n');
         }
 
-        var tmpFile = paths.PrefabCompileNewRefs;
+        var tmpFile = refsFile.Replace("_new_refs.txt", "_compile_new_refs.txt");
         RefsFile.EnsureFileWritable(tmpFile);
         File.WriteAllText(tmpFile, sb.ToString());
 
         await RunAsync(_tools.ResourceCompiler, "resourcecompiler.exe",
-            $"-retail -nop4 -game csgo -f -filelist \"{tmpFile}\"", env, ct);
+            $"-retail -nop4 -game csgo -f -filelist \"{tmpFile}\"", env, ct, critical: false);
     }
 
     // ---- ForceUV2ForVMAT: ensure the vmat has F_FORCE_UV2 right after its "shader" line ----
@@ -299,9 +358,11 @@ public sealed partial class MapImportService
         return m.Success ? int.Parse(m.Groups[1].Value) : 0;
     }
 
-    // ---- RunCommand: log the banner, run, throw on non-zero exit (utlc.RunCommand/Error) ----
+    // ---- RunCommand: log the banner, run. On non-zero exit, throw if critical
+    // (the map import itself) or just warn (a single asset compile/import) so the
+    // port completes and the validator can report what's actually missing. ----
     private async Task RunAsync(string toolPath, string fallbackExe, string arguments,
-        IReadOnlyDictionary<string, string> env, CancellationToken ct)
+        IReadOnlyDictionary<string, string> env, CancellationToken ct, bool critical = true)
     {
         var exe = File.Exists(toolPath) ? toolPath : fallbackExe;
         var display = $"{Path.GetFileName(exe)} {arguments}";
@@ -311,8 +372,13 @@ public sealed partial class MapImportService
         OnLog?.Invoke("--------------------------------");
 
         var exitCode = await _runner.RunAsync(exe, arguments, _workingDir, env, captured: null, ct);
-        if (exitCode != 0)
+        if (exitCode == 0)
+            return;
+
+        if (critical)
             throw new ImportToolException($"Error running:\n>>>{display}\nAborting (exit {exitCode})");
+
+        OnLog?.Invoke($"WARNING: {Path.GetFileName(exe)} exited {exitCode} (continuing): {arguments}");
     }
 
     [GeneratedRegex(@"[""']?numuvs[""']?\s*[:=]\s*(\d+)", RegexOptions.IgnoreCase)]

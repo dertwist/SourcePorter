@@ -23,6 +23,9 @@ public sealed class ValveToolLocator(string cs2GameRoot)
     public string Vpk => Path.Combine(_bin, "vpk.exe");
     public string Vbsp => Path.Combine(_importBin, "vbsp.exe");
 
+    /// <summary>The <c>vpk.signatures</c> file (guide §-1.1 workaround target).</summary>
+    public string VpkSignatures => Path.Combine(_bin, "vpk.signatures");
+
     /// <summary>The tool list whose presence the UI should verify up front.</summary>
     public IEnumerable<(string Name, string Path)> All =>
     [

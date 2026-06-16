@@ -46,6 +46,21 @@ public sealed class ImportPaths
     public string PrefabNewRefs => MapsContent("_prefab_new_refs.txt");
     public string PrefabCompileNewRefs => MapsContent("_prefab_compile_new_refs.txt");
 
+    /// <summary>
+    /// The refs file source1import actually produced. The Python assumes
+    /// <c>_prefab_refs.txt</c> (named that when -usebsp succeeds and merges
+    /// instances); when -usebsp falls back (e.g. spaces in the content path) the
+    /// tool writes plain <c>_refs.txt</c> instead. Return whichever exists.
+    /// </summary>
+    public string? ResolveRefsFile()
+    {
+        var prefab = MapsContent("_prefab_refs.txt");
+        if (File.Exists(prefab))
+            return prefab;
+        var plain = MapsContent("_refs.txt");
+        return File.Exists(plain) ? plain : null;
+    }
+
     /// <summary>Main imported <c>.vmap</c> in the content tree.</summary>
     public string ContentMainVmap => Path.Combine(S2ContentCsgo, "maps", MapName + ".vmap");
     public string ImportedMainVmap => Path.Combine(S2ContentCsgoImported, "maps", MapName + ".vmap");
