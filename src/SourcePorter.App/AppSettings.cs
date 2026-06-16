@@ -25,6 +25,9 @@ public sealed class AppSettings
     /// <summary>Compile the imported .vmap to .vmap_c after import (slow lighting bake).</summary>
     public bool CompileMap { get; set; }
 
+    /// <summary>Unpack a .bsp's embedded materials/models when decompiling it.</summary>
+    public bool UnpackEmbedded { get; set; } = true;
+
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
 
     private static string Path =>

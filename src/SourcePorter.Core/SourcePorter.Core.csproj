@@ -14,6 +14,14 @@
     -->
     <PackageReference Include="ValvePak" Version="4.0.0.142" />
     <PackageReference Include="ValveKeyValue" Version="0.20.0.417" />
+
+    <!--
+      Reads the Steam install path from the registry to auto-detect the CS2
+      install (Cs2InstallLocator). The registry APIs ship in the Windows
+      desktop targeting pack only, so the net9.0 (non -windows) TFM needs this
+      compat package. 5.0.0 is the last standalone release (netstandard2.0).
+    -->
+    <PackageReference Include="Microsoft.Win32.Registry" Version="5.0.0" />
   </ItemGroup>
 
 </Project>

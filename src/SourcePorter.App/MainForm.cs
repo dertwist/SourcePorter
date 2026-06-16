@@ -23,6 +23,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _noMerge = new() { Text = "Don't merge instances" };
     private readonly CheckBox _skipDeps = new() { Text = "Skip dependencies" };
     private readonly CheckBox _compileMap = new() { Text = "Compile map" };
+    private readonly CheckBox _unpackEmbedded = new() { Text = "Unpack BSP content" };
     private readonly NumericUpDown _threads = new() { Minimum = 1, Maximum = 16, Width = 48 };
     private readonly Button _import = new() { Text = "Import" };
     private readonly Button _cancel = new() { Text = "Cancel", Enabled = false };
@@ -49,6 +50,26 @@ public sealed class MainForm : Form
 
         AppendConsole($"SourcePorter v{Application.ProductVersion}", Themer.CurrentThemeColors.Accent);
         AppendConsole("Set the CS2 directory and a source .vmf, then press Import.", Themer.CurrentThemeColors.ContrastSoft);
+
+        TryAutoDetectCs2Directory();
+    }
+
+    /// <summary>
+    /// On first run (no saved CS2 directory) locate the install via the Windows
+    /// registry + Steam library folders, so the user rarely has to browse for it.
+    /// </summary>
+    private void TryAutoDetectCs2Directory()
+    {
+        if (!string.IsNullOrWhiteSpace(_cs2Dir.Text))
+            return;
+
+        var detected = Cs2InstallLocator.TryLocate();
+        if (detected is null)
+            return;
+
+        _cs2Dir.Text = detected;
+        AppendConsole($"Detected CS2 install: {detected}", Themer.CurrentThemeColors.ContrastSoft);
+        SaveSettings();
     }
 
     /// <summary>Loads the embedded multi-resolution app icon (see app.svg / app.ico).</summary>
@@ -63,14 +84,14 @@ public sealed class MainForm : Form
         // --- menu ---
         var menu = new MenuStrip { Renderer = new DarkToolStripRenderer(new CustomColorTable()) };
         var tools = new ToolStripMenuItem("&Tools");
-        tools.DropDownItems.Add("&Validate Addon…", Themer.GetIcon("Recover", 16), async (_, _) => await RunValidateAsync());
-        tools.DropDownItems.Add(new ToolStripSeparator());
-        tools.DropDownItems.Add("&Reference…", Themer.GetIcon("Find", 16), (_, _) => new ReferenceForm().Show(this));
         tools.DropDownItems.Add("&Configs Editor…", Themer.GetIcon("Settings", 16), (_, _) => new ConfigsEditorForm().Show(this));
+        var help = new ToolStripMenuItem("&Help");
+        help.DropDownItems.Add("&Reference…", Themer.GetIcon("Find", 16), (_, _) => new ReferenceForm().Show(this));
         var file = new ToolStripMenuItem("&File");
         file.DropDownItems.Add("E&xit", null, (_, _) => Close());
         menu.Items.Add(file);
         menu.Items.Add(tools);
+        menu.Items.Add(help);
 
         // --- input form ---
         var form = new TableLayoutPanel
@@ -91,7 +112,7 @@ public sealed class MainForm : Form
         _inputMode.Items.AddRange(["VMF", "BSP"]);
 
         var options = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
-        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileMap.AutoSize = true;
+        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileMap.AutoSize = _unpackEmbedded.AutoSize = true;
         _useBsp.CheckedChanged += (_, _) => { if (_useBsp.Checked) _noMerge.Checked = false; };
         _noMerge.CheckedChanged += (_, _) => { if (_noMerge.Checked) _useBsp.Checked = false; };
         options.Controls.Add(new Label { Text = "Input:", AutoSize = true, Margin = new Padding(0, 6, 2, 3) });
@@ -100,6 +121,7 @@ public sealed class MainForm : Form
         options.Controls.Add(_noMerge);
         options.Controls.Add(_skipDeps);
         options.Controls.Add(_compileMap);
+        options.Controls.Add(_unpackEmbedded);
         options.Controls.Add(new Label { Text = "Threads:", AutoSize = true, Margin = new Padding(12, 6, 2, 3) });
         options.Controls.Add(_threads);
         form.Controls.Add(options, 1, 3);
@@ -255,30 +277,26 @@ public sealed class MainForm : Form
         _cts = new CancellationTokenSource();
         try
         {
-            // BSP input: decompile to a .vmf then import that.
-            var vmf = source;
+            // Stage the source into a temp content root that satisfies source1import's
+            // "<contentdir>\maps\<name>.vmf" layout. For a .bsp this decompiles it first
+            // (and, when enabled, unpacks its embedded materials/models alongside).
+            string vmf;
             if (bspMode)
             {
-                // TryParseSourceMap requires \maps\ in the path. If the BSP already sits under
-                // a maps\ folder, keep it in place; otherwise output to <bsp-dir>\maps\<name>.vmf.
-                var candidateVmf = Path.ChangeExtension(source, ".vmf");
-                vmf = Cs2Install.TryParseSourceMap(candidateVmf, out _, out _)
-                    ? candidateVmf
-                    : Path.Combine(Path.GetDirectoryName(source)!, "maps",
-                                   Path.GetFileNameWithoutExtension(source) + ".vmf");
-
-                AppendConsole($"Decompiling {Path.GetFileName(source)} → {vmf}…", muted);
                 var decompiler = new BspDecompiler(runner);
                 decompiler.OnLog += LogFromWorker;
-                try { await Task.Run(() => decompiler.DecompileAsync(source, vmf, _cts.Token)); }
+                try
+                {
+                    vmf = await Task.Run(() =>
+                        MapStaging.StageBspAsync(decompiler, source, _unpackEmbedded.Checked, _cts.Token));
+                }
                 finally { decompiler.OnLog -= LogFromWorker; }
             }
-
-            if (!Cs2Install.TryParseSourceMap(vmf, out _, out _))
+            else
             {
-                AppendConsole("Source map must be inside a 'maps' folder.", red);
-                return;
+                vmf = MapStaging.StageVmf(source);
             }
+            AppendConsole($"Source staged → {vmf}", muted);
 
             var project = cs2.BuildProject(vmf, addon, new ImportOptions
             {
@@ -302,6 +320,9 @@ public sealed class MainForm : Form
 
             AppendConsole($"Done. Imported {project.MapName} into addon '{addon}'.", Themer.CurrentThemeColors.Accent);
             SetStatus("Import complete.");
+
+            // Validate the freshly converted addon's assets automatically.
+            await ValidateAddonAsync(cs2, addon, _cts.Token);
         }
         catch (OperationCanceledException)
         {
@@ -326,32 +347,22 @@ public sealed class MainForm : Form
     private static string ResolveImportScriptsDir(Cs2Install cs2) =>
         Directory.Exists(cs2.ImportScriptsDir) ? cs2.ImportScriptsDir : AppPaths.ImportScriptsDir;
 
-    private async Task RunValidateAsync()
+    /// <summary>
+    /// Runs the asset validator over the addon and reports findings to the console.
+    /// Called automatically at the end of a successful import — it does not own the
+    /// running-state or cancellation token; the caller (RunImportAsync) does, so the
+    /// Cancel button aborts validation too. Lets <see cref="OperationCanceledException"/>
+    /// propagate to the import's handler; other failures are reported without marking
+    /// the (already successful) import as failed.
+    /// </summary>
+    private async Task ValidateAddonAsync(Cs2Install cs2, string addon, CancellationToken ct)
     {
-        var cs2 = new Cs2Install(_cs2Dir.Text.Trim());
-        string? error = _cs2Dir.Text.Trim().Length == 0 ? "Set the CS2 directory."
-            : !Directory.Exists(cs2.InstallRoot) ? $"CS2 directory not found: {cs2.InstallRoot}"
-            : cs2.IsValid(out var v) ? null : v;
-        if (error is not null)
-        {
-            AppendConsole(error, Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
-            return;
-        }
-        var addon = _outputAddon.Text.Trim();
-        if (addon.Length == 0)
-        {
-            AppendConsole("Enter the output addon to validate.", Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
-            return;
-        }
-
         var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
-        SetRunning(true);
         SetStatus($"Validating {addon}…");
-        _cts = new CancellationTokenSource();
         try
         {
             var report = await Task.Run(() => new AssetValidator(cs2, addon)
-                .Validate(line => AppendConsole(line, Themer.CurrentThemeColors.ContrastSoft), _cts.Token));
+                .Validate(line => AppendConsole(line, Themer.CurrentThemeColors.ContrastSoft), ct));
 
             foreach (var issue in report.Issues)
                 AppendConsole($"  [{issue.Kind}] {issue.Source}  →  {issue.Detail}", red);
@@ -367,21 +378,10 @@ public sealed class MainForm : Form
                 SetStatus("Validation passed.");
             }
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            AppendConsole("Validation cancelled.", Themer.CurrentThemeColors.ContrastSoft);
-            SetStatus("Cancelled.");
-        }
-        catch (Exception ex)
-        {
-            AppendConsole(ex.Message, red);
+            AppendConsole($"Validation error: {ex.Message}", red);
             SetStatus("Validation failed.");
-        }
-        finally
-        {
-            _cts.Dispose();
-            _cts = null;
-            SetRunning(false);
         }
     }
 
@@ -439,6 +439,7 @@ public sealed class MainForm : Form
         _noMerge.CheckedChanged += (_, _) => SaveSettings();
         _skipDeps.CheckedChanged += (_, _) => SaveSettings();
         _compileMap.CheckedChanged += (_, _) => SaveSettings();
+        _unpackEmbedded.CheckedChanged += (_, _) => SaveSettings();
         _inputMode.SelectedIndexChanged += (_, _) => SaveSettings();
         _threads.ValueChanged += (_, _) => SaveSettings();
     }
@@ -462,6 +463,7 @@ public sealed class MainForm : Form
         _noMerge.Checked = _settings.UseBspNoMergeInstances;
         _skipDeps.Checked = _settings.SkipDeps;
         _compileMap.Checked = _settings.CompileMap;
+        _unpackEmbedded.Checked = _settings.UnpackEmbedded;
         _inputMode.SelectedItem = _inputMode.Items.Contains(_settings.InputMode) ? _settings.InputMode : "VMF";
         _threads.Value = Math.Clamp(_settings.Threads, (int)_threads.Minimum, (int)_threads.Maximum);
         UpdateTitle();
@@ -476,6 +478,7 @@ public sealed class MainForm : Form
         UseBspNoMergeInstances = _noMerge.Checked,
         SkipDeps = _skipDeps.Checked,
         CompileMap = _compileMap.Checked,
+        UnpackEmbedded = _unpackEmbedded.Checked,
         InputMode = _inputMode.SelectedItem as string ?? "VMF",
         Threads = (int)_threads.Value,
     };

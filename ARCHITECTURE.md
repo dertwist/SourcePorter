@@ -38,7 +38,8 @@ bump these together with the `TargetFramework`. See
 SourcePorter.sln
 ├─ src/
 │  ├─ SourcePorter.Core/        Class library — all porting logic, no UI.
-│  │  ├─ Domain/                PortProject, ImportOptions, Cs2Install.
+│  │  ├─ Domain/                PortProject, ImportOptions, Cs2Install,
+│  │  │                         Cs2InstallLocator (registry-based auto-detect).
 │  │  ├─ Toolchain/             1:1 port of import_map_community.py + utlc.py,
 │  │  │                         plus the bundled-BSPSource .bsp→.vmf bridge.
 │  │  │                         (ProcessRunner, ValveToolLocator, RefsFile,
@@ -85,6 +86,17 @@ content dir + map name by splitting the `.vmf` path at its `maps\` segment),
 then builds a [`PortProject`](src/SourcePorter.Core/Domain/PortProject.cs) that
 [`MapImportService`](src/SourcePorter.Core/Toolchain/MapImportService.cs)
 consumes. The exact command sequence is in §4.
+
+So the GUI rarely has to ask for the install at all,
+[`Cs2InstallLocator`](src/SourcePorter.Core/Domain/Cs2InstallLocator.cs)
+auto-detects it the way Steam itself does: read the Steam path from the registry
+(`HKCU\Software\Valve\Steam\SteamPath`, falling back to the `WOW6432Node`
+machine key), parse `steamapps\libraryfolders.vdf` (via `ValveKeyValue`) to find
+the library that owns app **730**, and return the first
+`…\common\Counter-Strike Global Offensive` that passes `Cs2Install.IsValid`. It is
+best-effort and never throws; `MainForm` calls it on first run when the saved CS2
+directory is empty. (Registry access on the non-`-windows` `net9.0` TFM is why
+Core references the `Microsoft.Win32.Registry` compat package.)
 
 The post-import fix-ups, asset audit, and packaging described in the S2ZE guide
 are **deliberately out of scope for the importer itself**. They remain optional
@@ -134,7 +146,22 @@ match the Python.
   **single self-contained `bspsrc.exe`** under `tools/bspsrc/` (its own bundled
   JRE — no system Java needed); `ResolveExe` finds it next to the app. BSPSource
   exits 0 even on a per-file failure, so the missing-output check — not the exit
-  code — is the real gate. See §4b for how that exe is built.
+  code — is the real gate. See §4b for how that exe is built. Two fix-ups run
+  after decompile: `PatchVmfHeader` prepends the `versioninfo`/`visgroups`/
+  `viewsettings` preamble BSPSource omits (without it `source1import` rejects the
+  vmf with *"CVMFtoVMAP: Missing a required top-level key"*); and, when requested,
+  `--unpack_embedded` extracts the BSP's packed materials/models so the addon is
+  self-contained (returned via `BspDecompileResult.UnpackDir`).
+- [`MapStaging`](src/SourcePorter.Core/Toolchain/MapStaging.cs) — the source-map
+  stager shared by the GUI and CLI. `source1import` requires the map at
+  `<contentdir>\maps\<name>.vmf` (it derives the content dir + map name by
+  splitting at `maps\`; see `Cs2Install.TryParseSourceMap`). `StageVmf` leaves a
+  correctly-structured `.vmf` in place but copies a loose one into a fresh per-map
+  temp content root (`%TEMP%\SourcePorter\<map>\maps\`). `StageBspAsync`
+  decompiles a `.bsp` into that temp root and adopts BSPSource's unpack dir (which
+  already holds `materials\`/`models\`/`maps\`) as the content root, then drops
+  the decompiled `.vmf` under its `maps\`. This keeps the user's own folders
+  untouched and gives each `.bsp` a single self-contained content root.
 
 The import sequence we reproduce, in order:
 
@@ -238,8 +265,10 @@ carries a guide §reference so the UI can link back to the rationale.
 ## 7. Asset validation (`Validation/`) — implemented
 
 Checks a compiled addon's `.vmap_c` / `.vmdl_c` / `.vmat_c` resources for
-**missing files** and **read errors**. Run from **Tools → Validate Addon**; uses
-the GUI's CS2 directory + output addon.
+**missing files** and **read errors**. It runs **automatically at the end of a
+successful import** (over the GUI's CS2 directory + output addon), reusing that
+run's cancellation token so Cancel aborts it too — there is no separate menu
+action.
 
 How it works (informed by studying VRF under `reference/`):
 
@@ -288,8 +317,10 @@ mounted, 15 resources, 43 references, 0 missing).
 WinForms with a deliberately thin code-behind. The shell
 ([`MainForm`](src/SourcePorter.App/MainForm.cs)) is a single importer screen:
 
-- a **menu** (`File`, `Tools`) — themed with `DarkToolStripRenderer` — with
-  **Validate Addon** (§7) and the Reference / Configs-editor windows;
+- a **menu** (`File`, `Tools`, `Help`) — themed with `DarkToolStripRenderer` —
+  with the **Configs Editor** window under `Tools` and the **Reference** window
+  under `Help`; asset validation (§7) is no longer a menu action — it runs
+  automatically after each import;
 - an **input form** (top): **CS2 Directory**, **Source Map** (`.vmf`), **Output
   Addon**, the BSP/skip-deps option checkboxes (with the importer's
   mutual-exclusion), and **Import** / **Cancel** buttons;
@@ -342,8 +373,9 @@ rendered exactly as upstream does:
 - `Themer.SvgToSkiaBitmap` / `GetSvgBitmap` / `GetIcon` (ported from VRF's
   Themer) rasterise them at the requested size with **Svg.Skia 5.0.0** (the same
   package VRF uses) — DPI-aware via `AdjustForDPI`.
-- Icons are used on the **Import** button (`Decompile`), the **Tools** menu
-  items (`Find`, `Settings`), and the console header (`Log`, `ClearLog`).
+- Icons are used on the **Import** button (`Decompile`), the menu items
+  (`Settings` on Configs Editor, `Find` on Reference), and the console header
+  (`Log`, `ClearLog`).
 - The VRF brand logo is intentionally **not** used as SourcePorter's identity.
   SourcePorter's app icon — [`app.svg`](src/SourcePorter.App/app.svg), rasterised
   to a multi-resolution `app.ico` and wired as the project's `ApplicationIcon` and

@@ -306,6 +306,15 @@ public static class Themer
             richTextBox.ForeColor = CurrentThemeColors.Contrast;
             richTextBox.BorderStyle = BorderStyle.None;
         }
+        // StatusStrip / MenuStrip / ToolStrip: the default ProfessionalRenderer
+        // paints a light silver gradient that ignores SetColorMode, so each strip
+        // needs the dark renderer (the menu sets it explicitly; this covers the rest).
+        if (control is ToolStrip toolStrip)
+        {
+            toolStrip.Renderer = new DarkToolStripRenderer(new CustomColorTable());
+            toolStrip.BackColor = CurrentThemeColors.App;
+            toolStrip.ForeColor = CurrentThemeColors.Contrast;
+        }
 
         foreach (Control childControl in control.Controls)
         {
