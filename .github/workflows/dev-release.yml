@@ -45,9 +45,6 @@ jobs:
             -p:DebugType=embedded `
             -o artifacts/publish
 
-      - name: Zip artifact
-        run: Compress-Archive -Path artifacts/publish/* -DestinationPath artifacts/SourcePorter-v0.1.0-win-x64.zip
-
       - name: Delete existing dev release
         run: gh release delete dev --yes --cleanup-tag
         env:
@@ -56,7 +53,7 @@ jobs:
 
       - name: Create dev release
         run: |
-          gh release create dev artifacts/SourcePorter-v0.1.0-win-x64.zip `
+          gh release create dev artifacts/publish/SourcePorter.App.exe `
             --title "SourcePorter v0.1.0 (dev)" `
             --notes "Latest development build from ``main``. Not a stable release." `
             --prerelease
