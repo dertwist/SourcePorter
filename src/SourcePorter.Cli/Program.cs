@@ -65,7 +65,7 @@ static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool 
     }
     else
     {
-        vmf = MapStaging.StageVmf(sourceMap);
+        vmf = MapStaging.StageVmf(sourceMap, Console.WriteLine);
     }
 
     var project = cs2.BuildProject(vmf, addon, new ImportOptions { MaxParallelism = threads });

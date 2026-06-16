@@ -20,15 +20,18 @@ public static class MapStaging
     public static string StagingRoot => Path.Combine(Path.GetTempPath(), "SourcePorter");
 
     /// <summary>
-    /// Ensures <paramref name="vmfPath"/> is usable as a source map. If it already
-    /// lives under a <c>maps\</c> folder it is used in place (no copy); otherwise it
-    /// is copied into a fresh temp content root. Returns the path to feed
-    /// <see cref="Cs2Install.BuildProject"/>.
+    /// Ensures <paramref name="vmfPath"/> is usable as a source map. A correctly
+    /// structured map that <c>source1import</c> already accepts (under a <c>maps\</c>
+    /// folder, with the required header) is used in place — preserving its sibling
+    /// materials/models content root. Anything else (a loose <c>.vmf</c>, or a
+    /// decompiled one missing the <c>versioninfo</c> preamble) is copied into a fresh
+    /// temp content root and fixed up there, so the user's own file is never mutated.
+    /// Returns the path to feed <see cref="Cs2Install.BuildProject"/>.
     /// </summary>
-    public static string StageVmf(string vmfPath)
+    public static string StageVmf(string vmfPath, Action<string>? log = null)
     {
-        // Already correctly structured (e.g. an SDK content tree): leave it alone.
-        if (Cs2Install.TryParseSourceMap(vmfPath, out _, out _))
+        var needsHeader = !VmfNormalizer.HasImportableHeader(vmfPath);
+        if (!needsHeader && Cs2Install.TryParseSourceMap(vmfPath, out _, out _))
             return vmfPath;
 
         var mapName = Path.GetFileNameWithoutExtension(vmfPath);
@@ -36,6 +39,8 @@ public static class MapStaging
         Directory.CreateDirectory(maps);
         var dest = Path.Combine(maps, mapName + ".vmf");
         File.Copy(vmfPath, dest, overwrite: true);
+        if (needsHeader)
+            VmfNormalizer.EnsureImportableHeader(dest, log);
         return dest;
     }
 

@@ -58,7 +58,7 @@ public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation =
             throw new InvalidOperationException(
                 $"BSPSource did not produce {outputVmfPath} — see the log above for the cause.");
 
-        PatchVmfHeader(outputVmfPath);
+        VmfNormalizer.EnsureImportableHeader(outputVmfPath, m => OnLog?.Invoke(m));
 
         // BSPSource unpacks embedded files into a sibling dir named after the output
         // .vmf (e.g. `<out-dir>\<map>\materials\…`), which is itself a content root.
@@ -75,23 +75,6 @@ public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation =
         }
 
         return new BspDecompileResult(outputVmfPath, unpackDir);
-    }
-
-    // BSPSource omits the versioninfo/visgroups/viewsettings preamble that
-    // source1import requires ("Missing a required top-level key"). Prepend it
-    // if absent.
-    private static void PatchVmfHeader(string vmfPath)
-    {
-        const string Header =
-            "versioninfo\r\n{\r\n\"editorversion\" \"400\"\r\n\"editorbuild\" \"6412\"\r\n" +
-            "\"mapversion\" \"1\"\r\n\"formatversion\" \"100\"\r\n\"prefab\" \"0\"\r\n}\r\n" +
-            "visgroups\r\n{\r\n}\r\nviewsettings\r\n{\r\n\"bSnapToGrid\" \"1\"\r\n" +
-            "\"bShowGrid\" \"1\"\r\n\"bShowLogicalGrid\" \"0\"\r\n\"nGridSpacing\" \"64\"\r\n" +
-            "\"bShow3DGrid\" \"0\"\r\n}\r\n";
-
-        var text = File.ReadAllText(vmfPath);
-        if (!text.TrimStart().StartsWith("versioninfo", StringComparison.OrdinalIgnoreCase))
-            File.WriteAllText(vmfPath, Header + text);
     }
 
     /// <summary>Locates <c>bspsrc.exe</c> from an explicit path/dir, else <c>tools/bspsrc/</c> by the exe.</summary>

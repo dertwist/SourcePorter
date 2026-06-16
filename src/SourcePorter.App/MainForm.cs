@@ -294,7 +294,7 @@ public sealed class MainForm : Form
             }
             else
             {
-                vmf = MapStaging.StageVmf(source);
+                vmf = await Task.Run(() => MapStaging.StageVmf(source, LogFromWorker));
             }
             AppendConsole($"Source staged → {vmf}", muted);
 

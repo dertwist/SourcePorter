@@ -146,22 +146,32 @@ match the Python.
   **single self-contained `bspsrc.exe`** under `tools/bspsrc/` (its own bundled
   JRE — no system Java needed); `ResolveExe` finds it next to the app. BSPSource
   exits 0 even on a per-file failure, so the missing-output check — not the exit
-  code — is the real gate. See §4b for how that exe is built. Two fix-ups run
-  after decompile: `PatchVmfHeader` prepends the `versioninfo`/`visgroups`/
-  `viewsettings` preamble BSPSource omits (without it `source1import` rejects the
-  vmf with *"CVMFtoVMAP: Missing a required top-level key"*); and, when requested,
+  code — is the real gate. See §4b for how that exe is built. After decompile it
+  runs `VmfNormalizer.EnsureImportableHeader` (below) and, when requested,
   `--unpack_embedded` extracts the BSP's packed materials/models so the addon is
   self-contained (returned via `BspDecompileResult.UnpackDir`).
+- [`VmfNormalizer`](src/SourcePorter.Core/Toolchain/VmfNormalizer.cs) — minimal,
+  lossless `.vmf` fix-ups that make a decompiled map importable **without** the
+  manual "open and re-save in Hammer" step. A decompiled `.vmf` starts straight at
+  `world`, omitting the `versioninfo`/`visgroups`/`viewsettings` preamble Hammer
+  writes; `source1import` then fails with *"CVMFtoVMAP: Missing a required
+  top-level key"*. `EnsureImportableHeader` prepends that preamble if absent
+  (idempotent; leaves a file that already has it byte-for-byte unchanged).
+  Verified end-to-end: with the preamble the map and all its dependency refs
+  import. Hammer's geometry re-save and the Hammer++ `*_plus` blocks are **not**
+  required. This is the single source of truth shared by both staging paths.
 - [`MapStaging`](src/SourcePorter.Core/Toolchain/MapStaging.cs) — the source-map
   stager shared by the GUI and CLI. `source1import` requires the map at
   `<contentdir>\maps\<name>.vmf` (it derives the content dir + map name by
   splitting at `maps\`; see `Cs2Install.TryParseSourceMap`). `StageVmf` leaves a
-  correctly-structured `.vmf` in place but copies a loose one into a fresh per-map
-  temp content root (`%TEMP%\SourcePorter\<map>\maps\`). `StageBspAsync`
-  decompiles a `.bsp` into that temp root and adopts BSPSource's unpack dir (which
-  already holds `materials\`/`models\`/`maps\`) as the content root, then drops
-  the decompiled `.vmf` under its `maps\`. This keeps the user's own folders
-  untouched and gives each `.bsp` a single self-contained content root.
+  correctly-structured, already-importable `.vmf` in place; anything else (a loose
+  `.vmf`, or one missing the preamble) is copied into a fresh per-map temp content
+  root (`%TEMP%\SourcePorter\<map>\maps\`) and run through `VmfNormalizer` there —
+  so the user's own file is never mutated. `StageBspAsync` decompiles a `.bsp`
+  into that temp root and adopts BSPSource's unpack dir (which already holds
+  `materials\`/`models\`/`maps\`) as the content root, then drops the decompiled
+  `.vmf` under its `maps\`. This keeps the user's folders untouched and gives each
+  `.bsp` a single self-contained content root.
 
 The import sequence we reproduce, in order:
 
