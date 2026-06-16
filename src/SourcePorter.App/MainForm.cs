@@ -26,6 +26,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _skipDeps = new() { Text = "Skip dependencies" };
     private readonly CheckBox _compileAssets = new() { Text = "Compile Assets" };
     private readonly CheckBox _compileMap = new() { Text = "Compile map" };
+    private readonly CheckBox _compactLog = new() { Text = "Compact log" };
     private readonly CheckBox _unpackEmbedded = new() { Text = "Unpack embedded content" };
     private readonly BorderedComboBox _threads = new();
     private ThemedGroupBox? _bspOptions; // BSP-only option group; shown only in BSP input mode
@@ -34,7 +35,7 @@ public sealed class MainForm : Form
     private TableLayoutPanel? _inputGrid; // the field grid, kept so we can tone its labels
     private readonly Button _import = new() { Text = "Import" };
     private readonly Button _cancel = new() { Text = "Cancel", Enabled = false };
-    private readonly RichTextBox _console = new();
+    private readonly ConsoleTextBox _console = new();
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _statusLabel = new();
 
@@ -151,7 +152,7 @@ public sealed class MainForm : Form
         AddField(form, 2, "Output Addon", _outputAddon, "Open", OpenOutputAddonFolder);
 
         // --- options, grouped by stage; the BSP group shows only in BSP mode ---
-        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileAssets.AutoSize = _compileMap.AutoSize = _unpackEmbedded.AutoSize = true;
+        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileAssets.AutoSize = _compileMap.AutoSize = _compactLog.AutoSize = _unpackEmbedded.AutoSize = true;
         _useBsp.CheckedChanged += (_, _) => { if (_useBsp.Checked) _noMerge.Checked = false; };
         _noMerge.CheckedChanged += (_, _) => { if (_noMerge.Checked) _useBsp.Checked = false; };
 
@@ -168,7 +169,7 @@ public sealed class MainForm : Form
         var threads = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
         threads.Controls.Add(new Label { Text = "Threads:", AutoSize = true, Margin = new Padding(10, 6, 4, 3) });
         threads.Controls.Add(_threads);
-        var importOptions = MakeOptionGroup("Import options", Themer.CurrentThemeColors.Border, _useBsp, _noMerge, _skipDeps, _compileAssets, _compileMap, threads);
+        var importOptions = MakeOptionGroup("Import options", Themer.CurrentThemeColors.Border, _useBsp, _noMerge, _skipDeps, _compileAssets, _compileMap, _compactLog, threads);
         importOptions.Margin = new Padding(0, 4, 0, 0);
 
         var optionsRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Margin = new Padding(0, 0, 0, 4) };
@@ -199,7 +200,11 @@ public sealed class MainForm : Form
         _console.BorderStyle = BorderStyle.None;
         _console.Font = new Font("Cascadia Mono", 9.5f);
         var consoleHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10, 4, 10, 8) };
+        // Add order matters: docking resolves last-added-first. Console (Fill) first so it
+        // takes the leftover space, then the line-number gutter (Left), then the header
+        // (Top, added last) so it spans the full width above both.
         consoleHost.Controls.Add(_console);
+        consoleHost.Controls.Add(new ConsoleLineGutter(_console));
         consoleHost.Controls.Add(BuildConsoleHeader());
 
         _statusLabel.Spring = true;
@@ -463,6 +468,7 @@ public sealed class MainForm : Form
                 UseBspNoMergeInstances = _noMerge.Checked,
                 SkipDeps = _skipDeps.Checked,
                 CompileAssets = _compileAssets.Checked,
+                CompactLog = _compactLog.Checked,
                 MaxParallelism = ThreadsValue,
             });
 
@@ -481,13 +487,12 @@ public sealed class MainForm : Form
             AppendConsole($"Done. Imported {project.MapName} into addon '{addon}'.", Themer.CurrentThemeColors.Accent);
             SetStatus("Import complete.");
 
-            // Validation reads compiled _c resources (RERL), so it only makes sense when
-            // something was compiled. With Compile Assets/Compile map off (the fast path)
-            // there are no _c files to check — skip with a note rather than report "0 resources".
-            if (_compileAssets.Checked || _compileMap.Checked)
-                await ValidateAddonAsync(cs2, addon, _cts.Token);
-            else
-                AppendConsole("Validation skipped — no assets were compiled (enable 'Compile Assets' to validate).", muted);
+            ReportAddonStats(cs2, addon);
+
+            // Validation checks compiled-resource RERL deps AND uncompiled model sources
+            // (missing .dmx/.fbx/.vmdl), so it's worth running even on the fast no-compile
+            // path — the source-dependency pass works without any _c files.
+            await ValidateAddonAsync(cs2, addon, _cts.Token);
         }
         catch (OperationCanceledException)
         {
@@ -546,17 +551,42 @@ public sealed class MainForm : Form
             var report = await Task.Run(() => new AssetValidator(cs2, addon)
                 .Validate(line => AppendConsole(line, Themer.CurrentThemeColors.ContrastSoft), ct));
 
+            // The missing-import list can be hundreds of lines — cap it so the console
+            // stays readable, but keep the full counts in the summary below.
+            const int cap = 60;
+            var shown = 0;
             foreach (var issue in report.Issues)
+            {
+                if (shown++ == cap)
+                {
+                    AppendConsole($"  …and {report.Issues.Count - cap} more (re-import with dependencies to resolve).", red);
+                    break;
+                }
                 AppendConsole($"  [{issue.Kind}] {issue.Source}  →  {issue.Detail}", red);
+            }
 
             if (report.HasIssues)
             {
-                AppendConsole($"Validation found {report.MissingCount} missing file(s) and {report.ErrorCount} unreadable resource(s).", red);
+                if (report.MissingImportCount > 0)
+                    AppendConsole(
+                        $"The content references {report.MissingImportMaterials} material(s) and {report.MissingImportModels} model(s) " +
+                        "that are NOT imported and NOT in base CS2 — the map will load with them missing. " +
+                        "Re-import with Skip-dependencies OFF (and Compile Assets ON for a shippable addon).", red);
+
+                AppendConsole(
+                    $"Validation found {report.MissingPrefabCount} missing prefab vmap(s), " +
+                    $"{report.MissingImportCount} un-imported material/model(s), " +
+                    $"{report.MissingSourceCount} missing mesh source(s), " +
+                    $"{report.MissingReferenceCount} missing compiled dep(s), and " +
+                    $"{report.ErrorCount} unreadable resource(s).", red);
                 SetStatus("Validation found issues.");
             }
             else
             {
-                AppendConsole($"Validation passed: {report.ResourcesScanned} resources, {report.ReferencesChecked} references, no missing files.", Themer.CurrentThemeColors.Accent);
+                AppendConsole(
+                    $"Validation passed: {report.ContentFilesScanned} content file(s), " +
+                    $"{report.ReferencesChecked} dependency(ies) checked — nothing missing.",
+                    Themer.CurrentThemeColors.Accent);
                 SetStatus("Validation passed.");
             }
         }
@@ -567,11 +597,32 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>Tallies and prints the imported addon's size + asset counts (see <see cref="AddonStats"/>).</summary>
+    private void ReportAddonStats(Cs2Install cs2, string addon)
+    {
+        try
+        {
+            var gameDir = Path.Combine(cs2.GameDir, "csgo_addons", addon);
+            var stats = AddonStats.Collect(cs2.ContentAddonDir(addon), gameDir);
+            foreach (var line in stats.Format())
+                AppendConsole(line, Themer.CurrentThemeColors.ContrastSoft);
+        }
+        catch (Exception ex)
+        {
+            AppendConsole($"Could not collect addon statistics: {ex.Message}", Themer.CurrentThemeColors.ContrastSoft);
+        }
+    }
+
     private void LogFromWorker(string line)
     {
         var color = Themer.CurrentThemeColors.Contrast;
         if (line.Contains("error", StringComparison.OrdinalIgnoreCase) || line.Contains("Aborting", StringComparison.OrdinalIgnoreCase))
             color = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
+        else if (line.StartsWith("▶", StringComparison.Ordinal))
+            color = Themer.CurrentThemeColors.Accent;
+        else if (line.StartsWith("  Ported ", StringComparison.Ordinal) || line.StartsWith("  Compiled ", StringComparison.Ordinal)
+            || line.StartsWith("  Imported ", StringComparison.Ordinal) || line.StartsWith("  (repeated ", StringComparison.Ordinal))
+            color = Themer.CurrentThemeColors.ContrastSoft;
         else if (line.StartsWith("---", StringComparison.Ordinal) || line.StartsWith("- Running", StringComparison.Ordinal))
             color = Themer.CurrentThemeColors.ContrastSoft;
 
@@ -630,6 +681,7 @@ public sealed class MainForm : Form
         _skipDeps.CheckedChanged += (_, _) => SaveSettings();
         _compileAssets.CheckedChanged += (_, _) => SaveSettings();
         _compileMap.CheckedChanged += (_, _) => SaveSettings();
+        _compactLog.CheckedChanged += (_, _) => SaveSettings();
         _unpackEmbedded.CheckedChanged += (_, _) => SaveSettings();
         _inputMode.SelectedIndexChanged += (_, _) => { UpdateInputModeUi(); SaveSettings(); };
         _threads.SelectedIndexChanged += (_, _) => SaveSettings();
@@ -655,6 +707,7 @@ public sealed class MainForm : Form
         _skipDeps.Checked = _settings.SkipDeps;
         _compileAssets.Checked = _settings.CompileAssets;
         _compileMap.Checked = _settings.CompileMap;
+        _compactLog.Checked = _settings.CompactLog;
         _unpackEmbedded.Checked = _settings.UnpackEmbedded;
         _inputMode.SelectedItem = _inputMode.Items.Contains(_settings.InputMode) ? _settings.InputMode : "VMF";
         UpdateInputModeUi();
@@ -672,6 +725,7 @@ public sealed class MainForm : Form
         SkipDeps = _skipDeps.Checked,
         CompileAssets = _compileAssets.Checked,
         CompileMap = _compileMap.Checked,
+        CompactLog = _compactLog.Checked,
         UnpackEmbedded = _unpackEmbedded.Checked,
         InputMode = _inputMode.SelectedItem as string ?? "VMF",
         Threads = ThreadsValue,

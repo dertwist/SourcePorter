@@ -40,7 +40,13 @@ public static class MapStaging
         var dest = Path.Combine(maps, mapName + ".vmf");
         File.Copy(vmfPath, dest, overwrite: true);
         if (needsHeader)
+        {
+            // Only a decompiled .vmf lacks the header; the same source can be missing
+            // the displacement offset subkeys, so repair them on this temp copy too
+            // (idempotent — a normal Hammer .vmf already has them).
             VmfNormalizer.EnsureImportableHeader(dest, log);
+            VmfNormalizer.EnsureDisplacementOffsets(dest, log);
+        }
         return dest;
     }
 

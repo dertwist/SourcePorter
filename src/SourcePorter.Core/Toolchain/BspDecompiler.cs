@@ -59,6 +59,7 @@ public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation =
                 $"BSPSource did not produce {outputVmfPath} — see the log above for the cause.");
 
         VmfNormalizer.EnsureImportableHeader(outputVmfPath, m => OnLog?.Invoke(m));
+        VmfNormalizer.EnsureDisplacementOffsets(outputVmfPath, m => OnLog?.Invoke(m));
 
         // BSPSource unpacks embedded files into a sibling dir named after the output
         // .vmf (e.g. `<out-dir>\<map>\materials\…`), which is itself a content root.

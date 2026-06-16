@@ -86,6 +86,99 @@ public sealed class BorderedComboBox : ComboBox
 }
 
 /// <summary>
+/// A <see cref="RichTextBox"/> for the import console. Word-wrap is off so each visual
+/// row is exactly one logical line (the line-number gutter can map 1:1), and it raises
+/// <see cref="ViewChanged"/> whenever it scrolls or repaints so a sibling
+/// <see cref="ConsoleLineGutter"/> can stay in sync without polling.
+/// </summary>
+public sealed class ConsoleTextBox : RichTextBox
+{
+    private const int WM_PAINT = 0x000F;
+    private const int WM_VSCROLL = 0x0115;
+    private const int WM_HSCROLL = 0x0114;
+
+    /// <summary>Raised after the control paints or scrolls (i.e. the visible rows may have moved).</summary>
+    public event EventHandler? ViewChanged;
+
+    public ConsoleTextBox()
+    {
+        // 1:1 line mapping for the gutter; long lines scroll horizontally instead of wrapping.
+        WordWrap = false;
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        base.WndProc(ref m);
+        if (m.Msg is WM_PAINT or WM_VSCROLL or WM_HSCROLL)
+            ViewChanged?.Invoke(this, EventArgs.Empty);
+    }
+}
+
+/// <summary>
+/// A line-number margin for a <see cref="ConsoleTextBox"/>, painted as a separate
+/// control docked to its left — the numbers are never part of the text, so they can't
+/// be selected or copied and never disturb the logged content. It tracks the console's
+/// scroll position and draws one right-aligned number per visible line, matching the
+/// console's font and dark background with a soft separator on the right.
+/// </summary>
+public sealed class ConsoleLineGutter : Control
+{
+    private readonly ConsoleTextBox _target;
+
+    public ConsoleLineGutter(ConsoleTextBox target)
+    {
+        _target = target;
+        SetStyle(
+            ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
+            | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+        TabStop = false;
+        Dock = DockStyle.Left;
+
+        _target.ViewChanged += (_, _) => Invalidate();
+        _target.FontChanged += (_, _) => { RecalcWidth(); Invalidate(); };
+        RecalcWidth();
+    }
+
+    // Wide enough for ~6 digits in the console font (DPI/font aware).
+    private void RecalcWidth() => Width = TextRenderer.MeasureText("000000", _target.Font).Width + 10;
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(_target.BackColor);
+
+        using (var separator = new Pen(Themer.CurrentThemeColors.Border))
+            g.DrawLine(separator, Width - 1, 0, Width - 1, Height);
+
+        if (!_target.IsHandleCreated || _target.TextLength == 0)
+            return;
+
+        var font = _target.Font;
+        var height = ClientSize.Height;
+        var firstLine = _target.GetLineFromCharIndex(_target.GetCharIndexFromPosition(new Point(0, 1)));
+
+        using var brush = new SolidBrush(Themer.CurrentThemeColors.ContrastSoft);
+        using var format = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Near };
+
+        for (var line = firstLine; ; line++)
+        {
+            var index = _target.GetFirstCharIndexFromLine(line);
+            // -1 = past the last line; == TextLength = the empty trailing line after the final newline.
+            if (index < 0 || index == _target.TextLength)
+                break;
+
+            var y = _target.GetPositionFromCharIndex(index).Y;
+            if (y > height)
+                break;
+
+            g.DrawString((line + 1).ToString(), font, brush,
+                new RectangleF(0, y, Width - 4, font.Height + 2), format);
+        }
+    }
+}
+
+/// <summary>
 /// A <see cref="GroupBox"/> that owner-draws its border in <see cref="BorderColor"/>.
 /// The standard GroupBox border colour is not themeable, so this lets the option
 /// groups use the soft border while the mode-specific BSP group uses the accent

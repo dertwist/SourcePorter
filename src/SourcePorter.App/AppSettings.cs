@@ -19,6 +19,9 @@ public sealed class AppSettings
     /// <summary>Compile imported asset sources (materials/models/refs) to _c — off by default for speed.</summary>
     public bool CompileAssets { get; set; }
 
+    /// <summary>Collapse the toolchain's verbose per-asset output into concise lines — on by default.</summary>
+    public bool CompactLog { get; set; } = true;
+
     /// <summary>"VMF" or "BSP" — the source map input type.</summary>
     public string InputMode { get; set; } = "VMF";
 

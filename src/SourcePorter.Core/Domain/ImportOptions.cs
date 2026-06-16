@@ -35,6 +35,16 @@ public sealed class ImportOptions
     public bool WriteLog { get; set; } = true;
 
     /// <summary>
+    /// Collapse the toolchain's verbose per-asset output (VTF dumps, "Wrote file …tga",
+    /// ProcessTexture notices, search-path spam, command banners) into one concise line
+    /// per imported material/model — "Ported foo.vmat", "Ported foo.vmdl" — and fold
+    /// runs of identical lines into "… (repeated N more times)". Warnings, errors, and
+    /// the map-import banners always pass through unchanged. On by default. See
+    /// <see cref="Toolchain.LogCompactor"/>.
+    /// </summary>
+    public bool CompactLog { get; set; } = true;
+
+    /// <summary>
     /// Max concurrent tool processes for the dependency phase (model import +
     /// material compile run in parallel). 1 = sequential (matches the Python).
     /// </summary>

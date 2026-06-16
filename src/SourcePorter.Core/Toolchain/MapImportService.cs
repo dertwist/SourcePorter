@@ -22,6 +22,11 @@ public sealed partial class MapImportService
     private int _maxParallelism = 1;
     private bool _compileAssets;
 
+    // Optional console compactor. Tool output arrives from several processes at once,
+    // so the (stateful) compactor is guarded by _emitLock. Null = pass everything through.
+    private LogCompactor? _compactor;
+    private readonly object _emitLock = new();
+
     /// <summary>Status/header lines (mirrors the Python <c>print_I</c> banners).</summary>
     public event Action<string>? OnLog;
 
@@ -38,7 +43,42 @@ public sealed partial class MapImportService
         _runner = runner;
         _workingDir = importScriptsDir ?? Environment.CurrentDirectory;
         _global2UvListPath = Path.Combine(_workingDir, "source1import_2uvmateriallist.txt");
-        _runner.OnOutput += line => OnLog?.Invoke(line.Text);
+        _runner.OnOutput += line => Emit(line.Text);
+    }
+
+    /// <summary>
+    /// Routes a log line through the compactor (when enabled) and raises
+    /// <see cref="OnLog"/>. The compactor is stateful and fed from multiple tool
+    /// threads, so access is serialised.
+    /// </summary>
+    private void Emit(string line)
+    {
+        var compactor = _compactor;
+        if (compactor is null)
+        {
+            OnLog?.Invoke(line);
+            return;
+        }
+
+        lock (_emitLock)
+        {
+            foreach (var outLine in compactor.Process(line))
+                OnLog?.Invoke(outLine);
+        }
+    }
+
+    /// <summary>Flushes any pending compactor state (a trailing repeat-count).</summary>
+    private void FlushLog()
+    {
+        var compactor = _compactor;
+        if (compactor is null)
+            return;
+
+        lock (_emitLock)
+        {
+            foreach (var outLine in compactor.Flush())
+                OnLog?.Invoke(outLine);
+        }
     }
 
     /// <summary>
@@ -53,6 +93,10 @@ public sealed partial class MapImportService
         var originalMapName = project.MapName;
         _maxParallelism = Math.Max(1, project.Import.MaxParallelism);
         _compileAssets = project.Import.CompileAssets;
+        _compactor = project.Import.CompactLog ? new LogCompactor() : null;
+
+        try
+        {
 
         var paths = new ImportPaths(project.S2GameInfoDir, addon, originalMapName);
 
@@ -63,13 +107,16 @@ public sealed partial class MapImportService
         // source1import can read the CS:GO pak01.vpk.
         using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures);
         if (signatures.Applied)
-            OnLog?.Invoke("Disabled vpk.signatures for this import (guide -1.1); will restore afterwards.");
+            Emit("Disabled vpk.signatures for this import (guide -1.1); will restore afterwards.");
 
-        // Heads-up: -usebsp passes the content path to vbsp unquoted; spaces in the
-        // install path (e.g. "Counter-Strike Global Offensive") break it and it
-        // falls back to vmf-only geo. Warn rather than fail.
-        if (project.Import.UseBsp && s1Content.Contains(' '))
-            OnLog?.Invoke("WARNING: -usebsp will likely fail (space in content path) and fall back to vmf-only geometry.");
+        // Terrain fix: -usebsp makes source1import shell out to vbsp to clean up the
+        // geometry (displacements/terrain), but it passes the content path to vbsp
+        // UNQUOTED — a space in the install path ("Counter-Strike Global Offensive")
+        // splits the argument, so vbsp prints usage, never runs, and the map falls back
+        // to broken vmf-only geo. Hand source1import the 8.3 short path (no spaces) so
+        // the path survives intact down to vbsp.
+        if ((project.Import.UseBsp || project.Import.UseBspNoMergeInstances) && s1Content.Contains(' '))
+            s1Content = ResolveSpaceFreeContentDir(s1Content);
 
         // --- import vmf -> vmap (built once with the ORIGINAL map name, reused for the re-import) ---
         var importArgs = BuildMapImportArgs(project, s1Game, s1Content, addon, originalMapName);
@@ -77,6 +124,12 @@ public sealed partial class MapImportService
 
         // replace 'instance' paths with 'prefab'
         paths.SwitchInstancesToPrefabs();
+
+        if (project.Import.SkipDeps)
+        {
+            Emit("Skip dependencies is ON — no materials or models were imported. " +
+                 "The map will be missing them; re-import with dependencies enabled for a complete addon.");
+        }
 
         if (!project.Import.SkipDeps)
         {
@@ -86,13 +139,13 @@ public sealed partial class MapImportService
             var refsFile = paths.ResolveRefsFile();
             if (refsFile is null)
             {
-                OnLog?.Invoke("WARNING: source1import produced no refs file — dependencies (materials/models) were not imported.");
+                Emit("WARNING: source1import produced no refs file — dependencies (materials/models) were not imported.");
             }
             else
             {
-                OnLog?.Invoke($"Importing dependencies from {Path.GetFileName(refsFile)}");
+                Emit($"Importing dependencies from {Path.GetFileName(refsFile)}");
                 if (!_compileAssets)
-                    OnLog?.Invoke("Compile Assets is off — importing asset sources only; skipping resourcecompiler. Enable 'Compile Assets' to compile materials/models.");
+                    Emit("Compile Assets is off — importing asset sources only; skipping resourcecompiler. Enable 'Compile Assets' to compile materials/models.");
 
                 // We strip out models as they go through the new importer last.
                 StripMdlsFromRefs(refsFile);
@@ -117,6 +170,34 @@ public sealed partial class MapImportService
             Directory.CreateDirectory(Path.GetDirectoryName(paths.ContentMainVmap)!);
             File.Copy(paths.ImportedMainVmap, paths.ContentMainVmap, overwrite: true);
         }
+
+        }
+        finally
+        {
+            FlushLog();
+            _compactor = null;
+        }
+    }
+
+    /// <summary>
+    /// Returns a space-free form of <paramref name="contentDir"/> for the
+    /// <c>-usebsp</c> path (see <see cref="ShortPath"/>). Falls back to the original
+    /// path (with a warning) when no 8.3 short name is available, in which case the
+    /// vbsp geometry pass will fail and the map imports with vmf-only terrain.
+    /// </summary>
+    private string ResolveSpaceFreeContentDir(string contentDir)
+    {
+        var shortPath = ShortPath.TryGet(contentDir);
+        if (shortPath is not null && !shortPath.Contains(' '))
+        {
+            Emit($"Using 8.3 short path for the content dir so -usebsp/vbsp gets a space-free argument: {shortPath}");
+            return shortPath;
+        }
+
+        Emit("WARNING: -usebsp may fail — the content path contains a space and no 8.3 short name is " +
+             "available (terrain would import as vmf-only geometry). Move the install to a space-free " +
+             "path, or enable 8.3 names on the volume (fsutil 8dot3name).");
+        return contentDir;
     }
 
     /// <summary>
@@ -127,26 +208,32 @@ public sealed partial class MapImportService
     public async Task<bool> CompileMapAsync(PortProject project, CancellationToken ct = default)
     {
         using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures);
+        _compactor = project.Import.CompactLog ? new LogCompactor() : null;
         var paths = new ImportPaths(project.S2GameInfoDir, project.AddonName, project.MapName);
         var vmap = paths.ContentMainVmap;
         if (!File.Exists(vmap))
         {
-            OnLog?.Invoke($"No imported .vmap to compile at {vmap}");
+            Emit($"No imported .vmap to compile at {vmap}");
             return false;
         }
 
         var env = new Dictionary<string, string> { ["VALVE_NO_AUTO_P4"] = "1" };
         try
         {
-            OnLog?.Invoke($"Compiling map {Path.GetFileName(vmap)} -> .vmap_c");
+            Emit($"Compiling map {Path.GetFileName(vmap)} -> .vmap_c");
             await RunAsync(_tools.ResourceCompiler, "resourcecompiler.exe",
                 $"-retail -nop4 -game csgo \"{vmap}\"", env, ct);
             return true;
         }
         catch (ImportToolException ex)
         {
-            OnLog?.Invoke($"Map compile failed: {ex.Message}");
+            Emit($"Map compile failed: {ex.Message}");
             return false;
+        }
+        finally
+        {
+            FlushLog();
+            _compactor = null;
         }
     }
 
@@ -186,7 +273,7 @@ public sealed partial class MapImportService
         var mdlFiles = RefsFile.ReadTextFile(mdlListPath);
         if (mdlFiles.Count < 1)
         {
-            OnLog?.Invoke("No MDLs to import");
+            Emit("No MDLs to import");
             return;
         }
 
@@ -206,7 +293,7 @@ public sealed partial class MapImportService
 
         var parallel = new ParallelOptions { MaxDegreeOfParallelism = _maxParallelism, CancellationToken = ct };
         if (_maxParallelism > 1)
-            OnLog?.Invoke($"Importing {modelJobs.Count} models with up to {_maxParallelism} parallel workers.");
+            Emit($"Importing {modelJobs.Count} models with up to {_maxParallelism} parallel workers.");
 
         // (1) Import each model in parallel; collect its material refs thread-safely.
         // Each cs_mdl_import writes model-specific files (.vmdl + _refs.txt), so the
@@ -389,9 +476,9 @@ public sealed partial class MapImportService
         var exe = File.Exists(toolPath) ? toolPath : fallbackExe;
         var display = $"{Path.GetFileName(exe)} {arguments}";
 
-        OnLog?.Invoke("--------------------------------");
-        OnLog?.Invoke("- Running Command: " + display);
-        OnLog?.Invoke("--------------------------------");
+        Emit("--------------------------------");
+        Emit("- Running Command: " + display);
+        Emit("--------------------------------");
 
         var exitCode = await _runner.RunAsync(exe, arguments, _workingDir, env, captured: null, ct);
         if (exitCode == 0)
@@ -400,7 +487,7 @@ public sealed partial class MapImportService
         if (critical)
             throw new ImportToolException($"Error running:\n>>>{display}\nAborting (exit {exitCode})");
 
-        OnLog?.Invoke($"WARNING: {Path.GetFileName(exe)} exited {exitCode} (continuing): {arguments}");
+        Emit($"WARNING: {Path.GetFileName(exe)} exited {exitCode} (continuing): {arguments}");
     }
 
     [GeneratedRegex(@"[""']?numuvs[""']?\s*[:=]\s*(\d+)", RegexOptions.IgnoreCase)]

@@ -134,6 +134,25 @@ match the Python.
   `Force2UVsIfRequired` ported faithfully. Per-asset tool failures are warnings;
   only the map import is fatal (`ImportToolException`). `CompileMapAsync` compiles
   the imported `.vmap` to `.vmap_c`.
+- **Terrain / `-usebsp` space fix.** `-usebsp` makes `source1import` shell out to
+  `vbsp.exe -prepfors2` to clean up Source 1 geometry (notably displacements/terrain),
+  but it passes the content path to `vbsp` **unquoted** — so the space in the install
+  path (*"Counter-Strike Global Offensive"*) splits the argument, `vbsp` prints usage,
+  never runs, and the map falls back to broken vmf-only geometry (`VBSP FAILED, using
+  vmf only for S2 geo`). When `-usebsp`/`-usebsp_nomergeinstances` is on and the content
+  dir contains a space, `ImportAsync` hands `source1import` the **8.3 short path** of
+  that dir ([`ShortPath`](src/SourcePorter.Core/Toolchain/ShortPath.cs), Win32
+  `GetShortPathName`) so the path survives intact down to `vbsp`. If no 8.3 name exists
+  (disabled on the volume) it warns instead of silently producing flat terrain.
+- **Console compaction ([`LogCompactor`](src/SourcePorter.Core/Toolchain/LogCompactor.cs),
+  `ImportOptions.CompactLog`, default on).** The toolchain emits a whole block per asset
+  (a VTF property dump, several `+- Wrote file …tga` lines, `ProcessTexture` notices,
+  search-path spam). `MapImportService` routes every log line — its own banners and the
+  tools' stdout/stderr — through a single stateful compactor (guarded by a lock, since
+  output streams from several tools at once) that folds each block into one
+  `Ported foo.vmat` / `Ported foo.vmdl` line and collapses runs of identical lines into
+  `… (repeated N more times)`. Warnings, errors, leaks and the map-import banner always
+  pass through. Exposed as the GUI **Compact log** checkbox and CLI `--verbose` (opt-out).
 - **Compile gate (`ImportOptions.CompileAssets`, default off — a speed lever).**
   The dependency phase always *imports* materials/models (`cs_mdl_import` +
   `source1import -usefilelist`) so the addon `content\` tree is fully populated,
@@ -172,6 +191,16 @@ match the Python.
   Verified end-to-end: with the preamble the map and all its dependency refs
   import. Hammer's geometry re-save and the Hammer++ `*_plus` blocks are **not**
   required. This is the single source of truth shared by both staging paths.
+  `EnsureDisplacementOffsets` is the second fix-up: BSPSource drops the
+  `offsets`/`offset_normals` subkeys from decompiled `dispinfo` displacements (they
+  are zero/default in the compiled BSP), but `source1import` requires them — without
+  them it logs *"Found a displacement missing a needed subkey"* and **discards the
+  displacement, so terrain disappears**. It injects neutral defaults (zero offsets,
+  `0 0 1` offset normals) sized to each displacement's power; the terrain shape (from
+  the present `normals`+`distances`) is unchanged. Idempotent — a normal Hammer `.vmf`
+  already has the subkeys, so it's a no-op there. Applied to the temp/decompiled copy
+  only, never the user's original. (Verified on a real decompiled map: 181/181
+  displacements repaired.)
 - [`MapStaging`](src/SourcePorter.Core/Toolchain/MapStaging.cs) — the source-map
   stager shared by the GUI and CLI. `source1import` requires the map at
   `<contentdir>\maps\<name>.vmf` (it derives the content dir + map name by
@@ -286,11 +315,34 @@ carries a guide §reference so the UI can link back to the rationale.
 
 ## 7. Asset validation (`Validation/`) — implemented
 
-Checks a compiled addon's `.vmap_c` / `.vmdl_c` / `.vmat_c` resources for
-**missing files** and **read errors**. It runs **automatically at the end of a
-successful import** (over the GUI's CS2 directory + output addon), reusing that
-run's cancellation token so Cancel aborts it too — there is no separate menu
-action.
+Validation is **content-driven**: it checks that every dependency the addon's
+**content files** reference actually resolves. It runs **automatically at the end of
+every import** (over the GUI's CS2 directory + output addon), reusing that run's
+cancellation token so Cancel aborts it too — there is no separate menu action.
+
+The primary pass scans each `.vmap` / `.vmdl` / `.vmat` in the addon's `content\` tree
+and extracts the asset paths it references — prefab `.vmap`s, materials, models, and
+model mesh sources — then verifies each:
+
+- **Prefab `.vmap`s** (a map's `map_asset_references` — the cubemap/nav/lighting/
+  gameplay/environment sub-maps) must exist in the addon content.
+- **Materials / models** must be **imported into the addon** (a `.vmat`/`.vmdl` source)
+  **or present in base CS2** (a compiled `_c` in a VPK); anything that is neither is the
+  real failure — *"the map loads with missing textures/props"*.
+- **Mesh sources** (`.dmx` / `.fbx` / `.smd` / `.obj`) a model references must exist
+  loose, else it can't be recompiled.
+
+This works without anything being compiled (it reads uncompiled content, not `_c`
+files), so it is **not** gated on **Compile Assets**. A secondary pass still walks the
+compiled `game\` `_c` resources' RERL when they exist. (A previous version validated
+only the compiled `game\` tree, so an import with dependencies skipped — 0 `_c` files —
+falsely reported "passed" while the map was missing every material/model it needs; the
+content scan is what fixes that.)
+
+The content files are read **byte-safely** because a main `.vmap` is text (KV2) but its
+prefab `.vmap`s are binary DMX — CS2 stores the referenced paths as plain strings in
+both, so a single scan handles both encodings (verified against a real 34 MB binary
+prefab: 357 model + 193 material refs extracted cleanly).
 
 How it works (informed by studying VRF under `reference/`):
 
@@ -307,10 +359,17 @@ How it works (informed by studying VRF under `reference/`):
   [`AddonInfo`](src/SourcePorter.Core/Validation/AddonInfo.cs) — use
   **ValveKeyValue** to read `gameinfo.gi` (which archives to mount) and
   `addoninfo.txt` (the addon title).
-- [`AssetValidator`](src/SourcePorter.Core/Validation/AssetValidator.cs) — for
-  each resource, reads its RERL and checks every reference (with `_c` appended)
-  resolves in a loose dir or VPK; reports `MissingReference` / `ReadError` in a
-  `ValidationReport`.
+- [`ContentReferenceScanner`](src/SourcePorter.Core/Validation/ContentReferenceScanner.cs)
+  — byte-safe extractor that pulls the prefab-map / material / model / mesh-source
+  paths out of a content `.vmap`/`.vmdl`/`.vmat` (text **or** binary), classifying each
+  by its asset root + extension.
+- [`AssetValidator`](src/SourcePorter.Core/Validation/AssetValidator.cs) — runs the
+  content-reference pass and the secondary compiled-RERL pass, reporting
+  `MissingPrefab` / `MissingImport` / `MissingSource` / `MissingReference` / `ReadError`
+  in a `ValidationReport`.
+- [`AddonStats`](src/SourcePorter.Core/Validation/AddonStats.cs) — not validation, but
+  shown alongside it: walks the content + compiled trees and reports the addon size and
+  `.vmat` / `.vmdl` / `.vmap` / texture / `_c` counts at the end of an import.
 
 Verified end-to-end on real addons (e.g. a clean addon: 11 base archives
 mounted, 15 resources, 43 references, 0 missing).
@@ -342,13 +401,13 @@ WinForms with a deliberately thin code-behind. The shell
 - a **menu** (`File`, `Tools`, `Help`) — themed with `DarkToolStripRenderer` —
   with the **Configs Editor** window under `Tools` and the **Reference** window
   under `Help`; asset validation (§7) is no longer a menu action — it runs
-  automatically after each import (and only when something was compiled — with
-  **Compile Assets**/**Compile map** off there are no `_c` files to check, so it
-  is skipped with a note rather than reporting a misleading "0 resources");
+  automatically after each import (always, since the model-source pass works
+  without any compiled `_c` files), followed by the **addon statistics** summary
+  (size + `.vmat`/`.vmdl`/`.vmap`/texture counts);
 - an **input form** (top): **CS2 Directory**, **Source Map** (`.vmf`), **Output
-  Addon**, the BSP / skip-deps / **Compile Assets** / Compile-map option
-  checkboxes (with the importer's mutual-exclusion), and **Import** / **Cancel**
-  buttons;
+  Addon**, the BSP / skip-deps / **Compile Assets** / Compile-map / **Compact log**
+  option checkboxes (with the importer's mutual-exclusion), and **Import** /
+  **Cancel** buttons;
 - a **dark console** (fill) the import output streams into;
 - a **status bar**.
 
