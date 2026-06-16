@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using SourcePorter.App.Theme;
 using SourcePorter.Core.Domain;
 using SourcePorter.Core.Toolchain;
@@ -18,13 +19,17 @@ public sealed class MainForm : Form
     private readonly TextBox _cs2Dir = new();
     private readonly TextBox _sourceMap = new();
     private readonly TextBox _outputAddon = new();
-    private readonly ComboBox _inputMode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 64 };
+    private readonly BorderedComboBox _inputMode = new();
     private readonly CheckBox _useBsp = new() { Text = "Use BSP" };
     private readonly CheckBox _noMerge = new() { Text = "Don't merge instances" };
     private readonly CheckBox _skipDeps = new() { Text = "Skip dependencies" };
     private readonly CheckBox _compileMap = new() { Text = "Compile map" };
-    private readonly CheckBox _unpackEmbedded = new() { Text = "Unpack BSP content" };
-    private readonly NumericUpDown _threads = new() { Minimum = 1, Maximum = 16, Width = 48 };
+    private readonly CheckBox _unpackEmbedded = new() { Text = "Unpack embedded content" };
+    private readonly BorderedComboBox _threads = new();
+    private ThemedGroupBox? _bspOptions; // BSP-only option group; shown only in BSP input mode
+
+    private int ThreadsValue => int.TryParse(_threads.SelectedItem as string, out var n) ? n : 4;
+    private TableLayoutPanel? _inputGrid; // the field grid, kept so we can tone its labels
     private readonly Button _import = new() { Text = "Import" };
     private readonly Button _cancel = new() { Text = "Cancel", Enabled = false };
     private readonly RichTextBox _console = new();
@@ -33,6 +38,11 @@ public sealed class MainForm : Form
 
     private CancellationTokenSource? _cts;
 
+    // Console output is queued here and flushed in batches by _logFlushTimer on the
+    // UI thread, so a chatty import can't flood the message pump and freeze the window.
+    private readonly ConcurrentQueue<(string Text, Color Color)> _pendingLog = new();
+    private readonly System.Windows.Forms.Timer _logFlushTimer = new() { Interval = 75 };
+
     public MainForm()
     {
         Text = "Source Porter";
@@ -40,13 +50,18 @@ public sealed class MainForm : Form
         MinimumSize = new Size(820, 560);
         Size = new Size(1040, 700);
         StartPosition = FormStartPosition.CenterScreen;
-        Font = new Font("Segoe UI", 9f);
+        Font = new Font("Segoe UI", 10f);
 
         BuildLayout();
         ApplySettingsToUi();
         WireSettingsPersistence();
         Themer.ApplyTheme(this);
+        RefineAppearance();
         FormClosing += (_, _) => SaveSettings();
+
+        _logFlushTimer.Tick += (_, _) => FlushConsole();
+        _logFlushTimer.Start();
+        FormClosing += (_, _) => _logFlushTimer.Stop();
 
         AppendConsole($"SourcePorter v{Application.ProductVersion}", Themer.CurrentThemeColors.Accent);
         AppendConsole("Set the CS2 directory and a source .vmf, then press Import.", Themer.CurrentThemeColors.ContrastSoft);
@@ -99,34 +114,56 @@ public sealed class MainForm : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             ColumnCount = 3,
-            Padding = new Padding(10, 8, 10, 4),
+            Padding = new Padding(12, 10, 12, 6),
         };
-        form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118));
         form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        _inputGrid = form;
 
         AddField(form, 0, "CS2 Directory", _cs2Dir, "Browse…", BrowseCs2Dir);
-        AddField(form, 1, "Source Map", _sourceMap, "Browse…", BrowseSourceMap);
-        AddField(form, 2, "Output Addon", _outputAddon, null, null);
 
+        // Input Method — its own row; the picker selects the source type (VMF/BSP)
+        // and the Browse filter, and toggles the BSP-only option group below.
         _inputMode.Items.AddRange(["VMF", "BSP"]);
+        _inputMode.Width = 96;
+        _inputMode.Anchor = AnchorStyles.Left;
+        _inputMode.Margin = new Padding(3, 4, 3, 4);
+        _inputMode.BorderColor = Themer.CurrentThemeColors.Accent;
+        form.Controls.Add(new Label { Text = "Input Method", Anchor = AnchorStyles.Left, AutoSize = true, Margin = new Padding(3, 7, 3, 3) }, 0, 1);
+        form.Controls.Add(_inputMode, 1, 1);
 
-        var options = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
+        AddField(form, 2, "Source Map", _sourceMap, "Browse…", BrowseSourceMap);
+        AddField(form, 3, "Output Addon", _outputAddon, null, null);
+
+        // --- options, grouped by stage; the BSP group shows only in BSP mode ---
         _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileMap.AutoSize = _unpackEmbedded.AutoSize = true;
         _useBsp.CheckedChanged += (_, _) => { if (_useBsp.Checked) _noMerge.Checked = false; };
         _noMerge.CheckedChanged += (_, _) => { if (_noMerge.Checked) _useBsp.Checked = false; };
-        options.Controls.Add(new Label { Text = "Input:", AutoSize = true, Margin = new Padding(0, 6, 2, 3) });
-        options.Controls.Add(_inputMode);
-        options.Controls.Add(_useBsp);
-        options.Controls.Add(_noMerge);
-        options.Controls.Add(_skipDeps);
-        options.Controls.Add(_compileMap);
-        options.Controls.Add(_unpackEmbedded);
-        options.Controls.Add(new Label { Text = "Threads:", AutoSize = true, Margin = new Padding(12, 6, 2, 3) });
-        options.Controls.Add(_threads);
-        form.Controls.Add(options, 1, 3);
 
-        var actions = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
+        // The mode-specific BSP group is accented to mark it as the active mode's group.
+        _bspOptions = MakeOptionGroup("BSP decompile", Themer.CurrentThemeColors.Accent, _unpackEmbedded);
+        _bspOptions.Margin = new Padding(0, 4, 10, 0);
+
+        for (var i = 1; i <= 16; i++)
+            _threads.Items.Add(i.ToString());
+        _threads.Width = 56;
+        _threads.Margin = new Padding(0, 3, 0, 3);
+        _threads.BorderColor = Themer.CurrentThemeColors.Border;
+
+        var threads = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
+        threads.Controls.Add(new Label { Text = "Threads:", AutoSize = true, Margin = new Padding(10, 6, 4, 3) });
+        threads.Controls.Add(_threads);
+        var importOptions = MakeOptionGroup("Import options", Themer.CurrentThemeColors.Border, _useBsp, _noMerge, _skipDeps, _compileMap, threads);
+        importOptions.Margin = new Padding(0, 4, 0, 0);
+
+        var optionsRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Margin = new Padding(0, 0, 0, 4) };
+        optionsRow.Controls.Add(_bspOptions);
+        optionsRow.Controls.Add(importOptions);
+        form.Controls.Add(optionsRow, 1, 4);
+        form.SetColumnSpan(optionsRow, 2);
+
+        var actions = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 6, 0, 2) };
         _import.Width = 120;
         _import.Height = 30;
         _import.Image = Themer.GetIcon("Decompile", 16);
@@ -139,13 +176,14 @@ public sealed class MainForm : Form
         _cancel.Click += (_, _) => _cts?.Cancel();
         actions.Controls.Add(_import);
         actions.Controls.Add(_cancel);
-        form.Controls.Add(actions, 1, 4);
+        form.Controls.Add(actions, 1, 5);
+        form.SetColumnSpan(actions, 2);
 
         // --- console ---
         _console.Dock = DockStyle.Fill;
         _console.ReadOnly = true;
         _console.BorderStyle = BorderStyle.None;
-        _console.Font = new Font("Cascadia Mono", 9f);
+        _console.Font = new Font("Cascadia Mono", 9.5f);
         var consoleHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10, 4, 10, 8) };
         consoleHost.Controls.Add(_console);
         consoleHost.Controls.Add(BuildConsoleHeader());
@@ -184,6 +222,73 @@ public sealed class MainForm : Form
         }
     }
 
+    // A themed GroupBox wrapping option controls in a single auto-sizing row.
+    private static ThemedGroupBox MakeOptionGroup(string title, Color borderColor, params Control[] controls)
+    {
+        var inner = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+        };
+        inner.Controls.AddRange(controls);
+
+        var group = new ThemedGroupBox
+        {
+            Text = title,
+            BorderColor = borderColor,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(10, 4, 10, 6),
+        };
+        group.Controls.Add(inner);
+        return group;
+    }
+
+    /// <summary>Shows the BSP-only option group only when the input method is BSP.</summary>
+    private void UpdateInputModeUi()
+    {
+        if (_bspOptions is not null)
+            _bspOptions.Visible =
+                string.Equals(_inputMode.SelectedItem as string, "BSP", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Post-theme polish. The base Themer paints every label high-contrast white, which
+    // reads flat; tone the field captions and group titles to the soft tone so the
+    // textbox values are the emphasis (the label/value hierarchy from the design), and
+    // give the primary Import button a subtle accent border. Runs after ApplyTheme.
+    private void RefineAppearance()
+    {
+        var muted = Themer.CurrentThemeColors.ContrastSoft;
+
+        if (_inputGrid is not null)
+            foreach (Control c in _inputGrid.Controls)
+                if (c is Label label)
+                    label.ForeColor = muted;
+
+        // Input fields read as "wells": one step lighter than the window (App), so
+        // the value text is the emphasis — matches the reference. The Themer paints
+        // them with the window colour, so re-assert it here after ApplyTheme.
+        var well = Themer.CurrentThemeColors.AppMiddle;
+        foreach (Control field in new Control[] { _cs2Dir, _sourceMap, _outputAddon, _inputMode, _threads })
+            field.BackColor = well;
+
+        MuteGroupTitles(this, muted);
+        _import.FlatAppearance.BorderColor = Themer.CurrentThemeColors.Accent;
+    }
+
+    private static void MuteGroupTitles(Control parent, Color color)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            if (child is GroupBox group)
+                group.ForeColor = color;
+            MuteGroupTitles(child, color);
+        }
+    }
+
     private Panel BuildConsoleHeader()
     {
         var header = new Panel { Dock = DockStyle.Top, Height = 24 };
@@ -209,7 +314,7 @@ public sealed class MainForm : Form
             Image = Themer.GetIcon("ClearLog", 16),
             FlatStyle = FlatStyle.Flat,
         };
-        clear.Click += (_, _) => _console.Clear();
+        clear.Click += (_, _) => { while (_pendingLog.TryDequeue(out _)) { } _console.Clear(); };
         new ToolTip().SetToolTip(clear, "Clear console");
 
         header.Controls.Add(title);
@@ -303,7 +408,7 @@ public sealed class MainForm : Form
                 UseBsp = _useBsp.Checked,
                 UseBspNoMergeInstances = _noMerge.Checked,
                 SkipDeps = _skipDeps.Checked,
-                MaxParallelism = (int)_threads.Value,
+                MaxParallelism = ThreadsValue,
             });
 
             service = new MapImportService(cs2.Tools, runner, ResolveImportScriptsDir(cs2));
@@ -404,17 +509,25 @@ public sealed class MainForm : Form
         _inputMode.Enabled = _threads.Enabled = !running;
     }
 
-    private void AppendConsole(string text, Color color)
-    {
-        if (_console.InvokeRequired)
-        {
-            _console.BeginInvoke(() => AppendConsole(text, color));
-            return;
-        }
+    // Thread-safe and cheap: the worker threads just enqueue. The actual RichTextBox
+    // writes happen in FlushConsole on the UI thread, batched, so input stays live.
+    private void AppendConsole(string text, Color color) => _pendingLog.Enqueue((text, color));
 
-        _console.SelectionStart = _console.TextLength;
-        _console.SelectionColor = color;
-        _console.AppendText(text + Environment.NewLine);
+    // Drains queued lines on the UI thread (called by _logFlushTimer). Bounded per
+    // tick so even a huge burst of output can't stall Cancel/menu/redraw handling.
+    private void FlushConsole()
+    {
+        if (_pendingLog.IsEmpty)
+            return;
+
+        var appended = 0;
+        while (appended < 400 && _pendingLog.TryDequeue(out var entry))
+        {
+            _console.SelectionStart = _console.TextLength;
+            _console.SelectionColor = entry.Color;
+            _console.AppendText(entry.Text + Environment.NewLine);
+            appended++;
+        }
         _console.SelectionColor = _console.ForeColor;
         _console.ScrollToCaret();
     }
@@ -440,8 +553,8 @@ public sealed class MainForm : Form
         _skipDeps.CheckedChanged += (_, _) => SaveSettings();
         _compileMap.CheckedChanged += (_, _) => SaveSettings();
         _unpackEmbedded.CheckedChanged += (_, _) => SaveSettings();
-        _inputMode.SelectedIndexChanged += (_, _) => SaveSettings();
-        _threads.ValueChanged += (_, _) => SaveSettings();
+        _inputMode.SelectedIndexChanged += (_, _) => { UpdateInputModeUi(); SaveSettings(); };
+        _threads.SelectedIndexChanged += (_, _) => SaveSettings();
     }
 
     private void SaveSettings() => CaptureSettings().Save();
@@ -465,7 +578,8 @@ public sealed class MainForm : Form
         _compileMap.Checked = _settings.CompileMap;
         _unpackEmbedded.Checked = _settings.UnpackEmbedded;
         _inputMode.SelectedItem = _inputMode.Items.Contains(_settings.InputMode) ? _settings.InputMode : "VMF";
-        _threads.Value = Math.Clamp(_settings.Threads, (int)_threads.Minimum, (int)_threads.Maximum);
+        UpdateInputModeUi();
+        _threads.SelectedItem = Math.Clamp(_settings.Threads, 1, 16).ToString();
         UpdateTitle();
     }
 
@@ -480,6 +594,6 @@ public sealed class MainForm : Form
         CompileMap = _compileMap.Checked,
         UnpackEmbedded = _unpackEmbedded.Checked,
         InputMode = _inputMode.SelectedItem as string ?? "VMF",
-        Threads = (int)_threads.Value,
+        Threads = ThreadsValue,
     };
 }

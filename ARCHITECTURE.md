@@ -388,11 +388,18 @@ rendered exactly as upstream does:
   (`Log`, `ClearLog`).
 - The VRF brand logo is intentionally **not** used as SourcePorter's identity.
   SourcePorter's app icon — [`app.svg`](src/SourcePorter.App/app.svg), rasterised
-  to a multi-resolution `app.ico` and wired as the project's `ApplicationIcon` and
-  the window/taskbar icon — places the **Source 2 "S²" mark** on a dark Source 2
-  Viewer tile (dark `App`/`AppMiddle` gradient, `Border` stroke). The glyphs are
-  lightened from the brand gray so they read on the dark tile, and the signature
-  orange swoosh is kept.
+  to a multi-resolution `app.ico` (16–256 px) and wired as the project's
+  `ApplicationIcon` and the window/taskbar icon — is an original composition on a
+  dark Source 2 Viewer tile (dark `App`/`AppMiddle` gradient, `Border` stroke, a
+  faint blue radial glow): a white **settings gear** (the import/automation
+  toolchain) over a bright **Source 2-blue swoosh** with a white **"2"**
+  (Counter-Strike 2). It is not Valve's logo. The same `docs/icon.png` (the 256-px
+  render) is shown in the README. **`app.svg` is the single source of truth; both
+  `app.ico` and `docs/icon.png` are rendered from it.** To regenerate after editing
+  `app.svg`, rasterise with Svg.Skia — the package the app already references — at
+  16/24/32/48/64/128/256 px, pack the frames into the `.ico`, and write the 256-px
+  frame to `docs/icon.png`. There is no checked-in generator (it's a throwaway
+  tool); don't hand-edit `app.ico` or `docs/icon.png`.
 
 ---
 

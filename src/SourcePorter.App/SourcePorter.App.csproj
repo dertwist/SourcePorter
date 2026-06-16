@@ -6,7 +6,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>SourcePorter.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <!-- Source-2-flavored app icon (rasterised from app.svg; see app.svg header). -->
+    <!-- Source-2-flavored app icon, rasterised from app.svg; regen steps in ARCHITECTURE.md §9. -->
     <ApplicationIcon>app.ico</ApplicationIcon>
     <!-- Per-monitor v2 DPI + dark title bars look correct on modern Windows. -->
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
