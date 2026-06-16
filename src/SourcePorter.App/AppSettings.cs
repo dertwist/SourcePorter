@@ -16,6 +16,9 @@ public sealed class AppSettings
     public bool UseBspNoMergeInstances { get; set; }
     public bool SkipDeps { get; set; }
 
+    /// <summary>Compile imported asset sources (materials/models/refs) to _c — off by default for speed.</summary>
+    public bool CompileAssets { get; set; }
+
     /// <summary>"VMF" or "BSP" — the source map input type.</summary>
     public string InputMode { get; set; } = "VMF";
 

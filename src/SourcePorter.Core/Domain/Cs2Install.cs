@@ -24,6 +24,16 @@ public sealed class Cs2Install(string installRoot)
     /// <summary>Valve's import scripts/configs: <c>&lt;root&gt;\game\csgo\import_scripts</c>.</summary>
     public string ImportScriptsDir => Path.Combine(S2GameInfoDir, "import_scripts");
 
+    /// <summary>
+    /// Parent of all addon content folders: <c>&lt;root&gt;\content\csgo_addons</c>.
+    /// (The content tree is where <c>source1import</c> writes the imported map and
+    /// assets — the working output a porter finishes in Hammer.)
+    /// </summary>
+    public string ContentAddonsDir => Path.Combine(InstallRoot, "content", "csgo_addons");
+
+    /// <summary>A specific addon's content folder: <c>&lt;root&gt;\content\csgo_addons\&lt;addon&gt;</c>.</summary>
+    public string ContentAddonDir(string addon) => Path.Combine(ContentAddonsDir, addon);
+
     /// <summary>Resolves the Valve command-line tools under this install.</summary>
     public ValveToolLocator Tools => new(GameDir);
 

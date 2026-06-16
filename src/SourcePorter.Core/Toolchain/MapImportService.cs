@@ -20,6 +20,7 @@ public sealed partial class MapImportService
     private readonly string _workingDir;
     private readonly string _global2UvListPath;
     private int _maxParallelism = 1;
+    private bool _compileAssets;
 
     /// <summary>Status/header lines (mirrors the Python <c>print_I</c> banners).</summary>
     public event Action<string>? OnLog;
@@ -51,6 +52,7 @@ public sealed partial class MapImportService
         var addon = project.AddonName;
         var originalMapName = project.MapName;
         _maxParallelism = Math.Max(1, project.Import.MaxParallelism);
+        _compileAssets = project.Import.CompileAssets;
 
         var paths = new ImportPaths(project.S2GameInfoDir, addon, originalMapName);
 
@@ -89,6 +91,8 @@ public sealed partial class MapImportService
             else
             {
                 OnLog?.Invoke($"Importing dependencies from {Path.GetFileName(refsFile)}");
+                if (!_compileAssets)
+                    OnLog?.Invoke("Compile Assets is off — importing asset sources only; skipping resourcecompiler. Enable 'Compile Assets' to compile materials/models.");
 
                 // We strip out models as they go through the new importer last.
                 StripMdlsFromRefs(refsFile);
@@ -242,16 +246,20 @@ public sealed partial class MapImportService
         }
 
         // (4) Compile materials in parallel — each writes a unique .vmat_c.
+        // (Gated by Compile Assets; the imported .vmat sources above are always written.)
         var materials = mdlMtls.Keys.Where(m => m.Length > 0 && !m.StartsWith('-')).ToList();
-        await Parallel.ForEachAsync(materials, parallel, async (mtl, token) =>
-        {
-            var vmat = Path.Combine(s2Content, mtl.Replace('/', '\\').Replace(".vmt", ".vmat"));
-            await RunAsync(_tools.ResourceCompiler, "resourcecompiler.exe",
-                $"-retail -nop4 -game csgo \"{vmat}\"", env, token, critical: false);
-        });
+        if (_compileAssets)
+            await Parallel.ForEachAsync(materials, parallel, async (mtl, token) =>
+            {
+                var vmat = Path.Combine(s2Content, mtl.Replace('/', '\\').Replace(".vmt", ".vmat"));
+                await RunAsync(_tools.ResourceCompiler, "resourcecompiler.exe",
+                    $"-retail -nop4 -game csgo \"{vmat}\"", env, token, critical: false);
+            });
 
-        // (5) Compile models. The 2-UV pass mutates shared state (the global list
-        // and shared .vmat files), so it stays sequential.
+        // (5) The 2-UV pass mutates shared state (the global list and shared .vmat
+        // files), so it stays sequential. The F_FORCE_UV2 source-patching always runs
+        // (cheap, keeps the .vmat correct for any later compile); only the per-model
+        // resourcecompiler invocation is gated by Compile Assets.
         RefsFile.EnsureFileWritable(_global2UvListPath);
         using var global2UvWriter = new StreamWriter(_global2UvListPath, append: true);
         foreach (var (mdlFile, _) in modelJobs)
@@ -262,6 +270,9 @@ public sealed partial class MapImportService
 
             var refsName = Path.Combine(s2Content, mdlFile.Replace(".mdl", "_refs.txt"));
             var force = Force2UvsIfRequired(s2Content, refsName, global2Uv, global2UvWriter);
+
+            if (!_compileAssets)
+                continue;
 
             var f = force ? "-f " : "";
             await RunAsync(_tools.ResourceCompiler, "resourcecompiler.exe",
@@ -279,6 +290,10 @@ public sealed partial class MapImportService
 
         var importArgs = $"-retail -nop4 -nop4sync -src1gameinfodir \"{s1Game}\" -s2addon {addon} -game csgo -usefilelist \"{refsFile}\"";
         await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct, critical: false);
+
+        // The refs are now imported as sources; only the compile below is gated.
+        if (!_compileAssets)
+            return;
 
         var s2Content = paths.S2ContentCsgoImported;
         var flat = RefsFile.ListStringFromRefs(RefsFile.ReadTextFile(refsFile)).Split('\n');

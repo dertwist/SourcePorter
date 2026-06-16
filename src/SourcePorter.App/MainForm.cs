@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using SourcePorter.App.Theme;
 using SourcePorter.Core.Domain;
 using SourcePorter.Core.Toolchain;
@@ -23,6 +24,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _useBsp = new() { Text = "Use BSP" };
     private readonly CheckBox _noMerge = new() { Text = "Don't merge instances" };
     private readonly CheckBox _skipDeps = new() { Text = "Skip dependencies" };
+    private readonly CheckBox _compileAssets = new() { Text = "Compile Assets" };
     private readonly CheckBox _compileMap = new() { Text = "Compile map" };
     private readonly CheckBox _unpackEmbedded = new() { Text = "Unpack embedded content" };
     private readonly BorderedComboBox _threads = new();
@@ -123,21 +125,33 @@ public sealed class MainForm : Form
 
         AddField(form, 0, "CS2 Directory", _cs2Dir, "Browse…", BrowseCs2Dir);
 
-        // Input Method — its own row; the picker selects the source type (VMF/BSP)
-        // and the Browse filter, and toggles the BSP-only option group below.
+        // Source Map row: the Input Method picker (VMF/BSP) sits inline ahead of the
+        // path — it selects the source type and the Browse filter, and toggles the
+        // BSP-only option group below.
         _inputMode.Items.AddRange(["VMF", "BSP"]);
         _inputMode.Width = 96;
         _inputMode.Anchor = AnchorStyles.Left;
-        _inputMode.Margin = new Padding(3, 4, 3, 4);
+        _inputMode.Margin = new Padding(0, 4, 8, 4);
         _inputMode.BorderColor = Themer.CurrentThemeColors.Accent;
-        form.Controls.Add(new Label { Text = "Input Method", Anchor = AnchorStyles.Left, AutoSize = true, Margin = new Padding(3, 7, 3, 3) }, 0, 1);
-        form.Controls.Add(_inputMode, 1, 1);
+        _sourceMap.Dock = DockStyle.Fill;
+        _sourceMap.Margin = new Padding(0, 4, 3, 4);
 
-        AddField(form, 2, "Source Map", _sourceMap, "Browse…", BrowseSourceMap);
-        AddField(form, 3, "Output Addon", _outputAddon, null, null);
+        var sourceCell = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = Padding.Empty };
+        sourceCell.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        sourceCell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        sourceCell.Controls.Add(_inputMode, 0, 0);
+        sourceCell.Controls.Add(_sourceMap, 1, 0);
+
+        form.Controls.Add(new Label { Text = "Source Map", Anchor = AnchorStyles.Left, AutoSize = true, Margin = new Padding(3, 7, 3, 3) }, 0, 1);
+        form.Controls.Add(sourceCell, 1, 1);
+        var browseSource = new Button { Text = "Browse…", Dock = DockStyle.Fill, Margin = new Padding(3, 4, 3, 4) };
+        browseSource.Click += (_, _) => BrowseSourceMap();
+        form.Controls.Add(browseSource, 2, 1);
+
+        AddField(form, 2, "Output Addon", _outputAddon, "Open", OpenOutputAddonFolder);
 
         // --- options, grouped by stage; the BSP group shows only in BSP mode ---
-        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileMap.AutoSize = _unpackEmbedded.AutoSize = true;
+        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileAssets.AutoSize = _compileMap.AutoSize = _unpackEmbedded.AutoSize = true;
         _useBsp.CheckedChanged += (_, _) => { if (_useBsp.Checked) _noMerge.Checked = false; };
         _noMerge.CheckedChanged += (_, _) => { if (_noMerge.Checked) _useBsp.Checked = false; };
 
@@ -154,13 +168,13 @@ public sealed class MainForm : Form
         var threads = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
         threads.Controls.Add(new Label { Text = "Threads:", AutoSize = true, Margin = new Padding(10, 6, 4, 3) });
         threads.Controls.Add(_threads);
-        var importOptions = MakeOptionGroup("Import options", Themer.CurrentThemeColors.Border, _useBsp, _noMerge, _skipDeps, _compileMap, threads);
+        var importOptions = MakeOptionGroup("Import options", Themer.CurrentThemeColors.Border, _useBsp, _noMerge, _skipDeps, _compileAssets, _compileMap, threads);
         importOptions.Margin = new Padding(0, 4, 0, 0);
 
         var optionsRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Margin = new Padding(0, 0, 0, 4) };
         optionsRow.Controls.Add(_bspOptions);
         optionsRow.Controls.Add(importOptions);
-        form.Controls.Add(optionsRow, 1, 4);
+        form.Controls.Add(optionsRow, 1, 3);
         form.SetColumnSpan(optionsRow, 2);
 
         var actions = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 6, 0, 2) };
@@ -173,10 +187,10 @@ public sealed class MainForm : Form
         _import.Click += async (_, _) => await RunImportAsync();
         _cancel.Width = 90;
         _cancel.Height = 30;
-        _cancel.Click += (_, _) => _cts?.Cancel();
+        _cancel.Click += (_, _) => CancelImport();
         actions.Controls.Add(_import);
         actions.Controls.Add(_cancel);
-        form.Controls.Add(actions, 1, 5);
+        form.Controls.Add(actions, 1, 4);
         form.SetColumnSpan(actions, 2);
 
         // --- console ---
@@ -356,6 +370,46 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// Opens the output addon's content folder in Explorer. Falls back to the
+    /// <c>content\csgo_addons</c> parent when the addon hasn't been imported yet
+    /// (or no name is set), so the button always lands somewhere useful.
+    /// </summary>
+    private void OpenOutputAddonFolder()
+    {
+        var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
+
+        var root = _cs2Dir.Text.Trim();
+        if (root.Length == 0 || !Directory.Exists(root))
+        {
+            AppendConsole("Set a valid CS2 directory first.", red);
+            return;
+        }
+
+        var cs2 = new Cs2Install(root);
+        var addon = _outputAddon.Text.Trim();
+        var addonDir = cs2.ContentAddonDir(addon);
+
+        var target = addon.Length > 0 && Directory.Exists(addonDir) ? addonDir
+            : Directory.Exists(cs2.ContentAddonsDir) ? cs2.ContentAddonsDir
+            : null;
+
+        if (target is null)
+        {
+            AppendConsole($"Folder not found: {cs2.ContentAddonsDir}", red);
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            AppendConsole($"Couldn't open folder: {ex.Message}", red);
+        }
+    }
+
     private async Task RunImportAsync()
     {
         var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
@@ -408,6 +462,7 @@ public sealed class MainForm : Form
                 UseBsp = _useBsp.Checked,
                 UseBspNoMergeInstances = _noMerge.Checked,
                 SkipDeps = _skipDeps.Checked,
+                CompileAssets = _compileAssets.Checked,
                 MaxParallelism = ThreadsValue,
             });
 
@@ -426,8 +481,13 @@ public sealed class MainForm : Form
             AppendConsole($"Done. Imported {project.MapName} into addon '{addon}'.", Themer.CurrentThemeColors.Accent);
             SetStatus("Import complete.");
 
-            // Validate the freshly converted addon's assets automatically.
-            await ValidateAddonAsync(cs2, addon, _cts.Token);
+            // Validation reads compiled _c resources (RERL), so it only makes sense when
+            // something was compiled. With Compile Assets/Compile map off (the fast path)
+            // there are no _c files to check — skip with a note rather than report "0 resources".
+            if (_compileAssets.Checked || _compileMap.Checked)
+                await ValidateAddonAsync(cs2, addon, _cts.Token);
+            else
+                AppendConsole("Validation skipped — no assets were compiled (enable 'Compile Assets' to validate).", muted);
         }
         catch (OperationCanceledException)
         {
@@ -446,6 +506,23 @@ public sealed class MainForm : Form
             _cts = null;
             SetRunning(false);
         }
+    }
+
+    /// <summary>
+    /// Requests cancellation without blocking the UI thread. <see cref="CancellationTokenSource.Cancel()"/>
+    /// runs its registered callbacks synchronously on the caller — and those callbacks kill the tool
+    /// process trees (<c>Process.Kill(entireProcessTree: true)</c>), which can take a while and would
+    /// freeze the window. <see cref="CancellationTokenSource.CancelAsync"/> runs them on the thread pool
+    /// instead, so the UI stays responsive. The button is disabled to give feedback and block re-clicks.
+    /// </summary>
+    private void CancelImport()
+    {
+        if (_cts is null)
+            return;
+
+        _cancel.Enabled = false;
+        SetStatus("Cancelling…");
+        _ = _cts.CancelAsync();
     }
 
     // source1import needs its real home dir as cwd (config lists + ./bin/vbsp.exe).
@@ -551,6 +628,7 @@ public sealed class MainForm : Form
         _useBsp.CheckedChanged += (_, _) => SaveSettings();
         _noMerge.CheckedChanged += (_, _) => SaveSettings();
         _skipDeps.CheckedChanged += (_, _) => SaveSettings();
+        _compileAssets.CheckedChanged += (_, _) => SaveSettings();
         _compileMap.CheckedChanged += (_, _) => SaveSettings();
         _unpackEmbedded.CheckedChanged += (_, _) => SaveSettings();
         _inputMode.SelectedIndexChanged += (_, _) => { UpdateInputModeUi(); SaveSettings(); };
@@ -575,6 +653,7 @@ public sealed class MainForm : Form
         _useBsp.Checked = _settings.UseBsp;
         _noMerge.Checked = _settings.UseBspNoMergeInstances;
         _skipDeps.Checked = _settings.SkipDeps;
+        _compileAssets.Checked = _settings.CompileAssets;
         _compileMap.Checked = _settings.CompileMap;
         _unpackEmbedded.Checked = _settings.UnpackEmbedded;
         _inputMode.SelectedItem = _inputMode.Items.Contains(_settings.InputMode) ? _settings.InputMode : "VMF";
@@ -591,6 +670,7 @@ public sealed class MainForm : Form
         UseBsp = _useBsp.Checked,
         UseBspNoMergeInstances = _noMerge.Checked,
         SkipDeps = _skipDeps.Checked,
+        CompileAssets = _compileAssets.Checked,
         CompileMap = _compileMap.Checked,
         UnpackEmbedded = _unpackEmbedded.Checked,
         InputMode = _inputMode.SelectedItem as string ?? "VMF",

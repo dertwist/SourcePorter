@@ -134,6 +134,18 @@ match the Python.
   `Force2UVsIfRequired` ported faithfully. Per-asset tool failures are warnings;
   only the map import is fatal (`ImportToolException`). `CompileMapAsync` compiles
   the imported `.vmap` to `.vmap_c`.
+- **Compile gate (`ImportOptions.CompileAssets`, default off — a speed lever).**
+  The dependency phase always *imports* materials/models (`cs_mdl_import` +
+  `source1import -usefilelist`) so the addon `content\` tree is fully populated,
+  but the three per-asset `resourcecompiler` passes (materials, models, the refs
+  filelist) only run when `CompileAssets` is set. Off ⇒ a fast "import sources
+  now, compile later in Hammer" port; the cheap `F_FORCE_UV2` `.vmat` source
+  patching still runs so a later compile is correct, and the second `source1import`
+  re-run still runs (it picks up the *imported* material sources). This is finer
+  than `SkipDeps` (which skips importing deps entirely) and orthogonal to the
+  main-map `CompileMapAsync` (the separate "Compile map" option). Exposed as the
+  GUI **Compile Assets** checkbox and CLI `--no-compile-assets` (CLI defaults it
+  *on* so its automatic validation has `_c` files to check).
 - **Concurrency:** the dependency phase runs model import (`cs_mdl_import`) and
   material compile (`resourcecompiler`) in parallel via `Parallel.ForEachAsync`,
   bounded by `ImportOptions.MaxParallelism` (default 4; 1 = sequential). The 2-UV
@@ -330,10 +342,13 @@ WinForms with a deliberately thin code-behind. The shell
 - a **menu** (`File`, `Tools`, `Help`) — themed with `DarkToolStripRenderer` —
   with the **Configs Editor** window under `Tools` and the **Reference** window
   under `Help`; asset validation (§7) is no longer a menu action — it runs
-  automatically after each import;
+  automatically after each import (and only when something was compiled — with
+  **Compile Assets**/**Compile map** off there are no `_c` files to check, so it
+  is skipped with a note rather than reporting a misleading "0 resources");
 - an **input form** (top): **CS2 Directory**, **Source Map** (`.vmf`), **Output
-  Addon**, the BSP/skip-deps option checkboxes (with the importer's
-  mutual-exclusion), and **Import** / **Cancel** buttons;
+  Addon**, the BSP / skip-deps / **Compile Assets** / Compile-map option
+  checkboxes (with the importer's mutual-exclusion), and **Import** / **Cancel**
+  buttons;
 - a **dark console** (fill) the import output streams into;
 - a **status bar**.
 

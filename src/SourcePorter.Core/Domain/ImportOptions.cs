@@ -19,6 +19,18 @@ public sealed class ImportOptions
     /// <summary>Only produce the .vmap(s); skip importing/compiling dependencies.</summary>
     public bool SkipDeps { get; set; }
 
+    /// <summary>
+    /// Compile the imported asset <em>sources</em> (materials, models, refs) to their
+    /// <c>_c</c> files via <c>resourcecompiler</c> during the dependency phase. When
+    /// <c>false</c> (the default, for speed) the dependencies are still <em>imported</em>
+    /// — so the addon's <c>content\</c> tree is fully populated — but the slow
+    /// per-asset compile is skipped, leaving compilation to Hammer (or a later run with
+    /// this enabled). Independent of <see cref="SkipDeps"/> (which skips importing deps
+    /// entirely) and of the main-map <c>.vmap</c> compile (see
+    /// <see cref="MapImportService.CompileMapAsync"/>).
+    /// </summary>
+    public bool CompileAssets { get; set; }
+
     /// <summary>Tee the toolchain console output to a log file (guide §1.2.2.1).</summary>
     public bool WriteLog { get; set; } = true;
 
