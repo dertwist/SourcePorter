@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>SourcePorter.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Source 2 asset library (VPK, KV3, VMAP/VMDL/VMAT, textures, sounds).
+      Pinned to 15.0.4937 — the newest release that targets net9.0.
+      Newer builds (>=16) require the .NET 10 SDK; bump this together with
+      the TargetFramework once the net10 SDK is installed. See ARCHITECTURE.md.
+    -->
+    <PackageReference Include="ValveResourceFormat" Version="15.0.4937" />
+  </ItemGroup>
+
+</Project>

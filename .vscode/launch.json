@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch SourcePorter (Debug)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/SourcePorter.App/bin/Debug/net9.0-windows/SourcePorter.App.dll",
+      "cwd": "${workspaceFolder}/src/SourcePorter.App",
+      "console": "internalConsole",
+      "stopAtEntry": false
+    }
+  ]
+}

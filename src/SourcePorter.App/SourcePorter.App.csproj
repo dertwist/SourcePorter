@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>SourcePorter.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Per-monitor v2 DPI + dark title bars look correct on modern Windows. -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!--
+      WFO5001: Application.SetColorMode / SystemColorMode are .NET 9 "evaluation
+      only" APIs. The Source 2 Viewer opts into them the same way for its theme.
+    -->
+    <NoWarn>$(NoWarn);WFO5001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SourcePorter.Core\SourcePorter.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Same SVG rasteriser the Source 2 Viewer uses for its icons. -->
+    <PackageReference Include="Svg.Skia" Version="5.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Source 2 Viewer (ValveResourceFormat, MIT) icons, embedded for runtime SVG rendering. -->
+    <EmbeddedResource Include="Icons\*.svg" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Valve's source1import configs (copied from CS2's import_scripts). Shipped
+      next to the exe under import_scripts\; this becomes the importer's working
+      directory so the tool resolves its exclusion/material lists exactly as the
+      original scripts do (source1import_2uvmateriallist.txt is appended at runtime).
+    -->
+    <Content Include="..\..\tools\import_scripts\*.txt"
+             Link="import_scripts\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
