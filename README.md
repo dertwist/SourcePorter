@@ -6,7 +6,7 @@
 
 **Port your CS:GO / CS:S maps to Counter-Strike 2**
 
-[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)](https://github.com/dertwist/SourcePorter/releases/download/dev/SourcePorter.App.exe)
+[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)](https://github.com/dertwist/SourcePorter/releases/download/dev/SourcePorter.exe)
 [![.NET 9](https://img.shields.io/badge/.NET-9.0-512BD4?logo=dotnet&logoColor=white)](#build-from-source)
 
 <img src="docs/screenshot.png" alt="SourcePorter main window" width="820" />
