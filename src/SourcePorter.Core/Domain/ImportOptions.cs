@@ -21,4 +21,10 @@ public sealed class ImportOptions
 
     /// <summary>Tee the toolchain console output to a log file (guide §1.2.2.1).</summary>
     public bool WriteLog { get; set; } = true;
+
+    /// <summary>
+    /// Max concurrent tool processes for the dependency phase (model import +
+    /// material compile run in parallel). 1 = sequential (matches the Python).
+    /// </summary>
+    public int MaxParallelism { get; set; } = 4;
 }

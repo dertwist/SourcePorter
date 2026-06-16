@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
 using SourcePorter.Core.Domain;
@@ -18,6 +19,7 @@ public sealed partial class MapImportService
     private readonly ProcessRunner _runner;
     private readonly string _workingDir;
     private readonly string _global2UvListPath;
+    private int _maxParallelism = 1;
 
     /// <summary>Status/header lines (mirrors the Python <c>print_I</c> banners).</summary>
     public event Action<string>? OnLog;
@@ -48,6 +50,7 @@ public sealed partial class MapImportService
         var s1Content = project.S1ContentDir;
         var addon = project.AddonName;
         var originalMapName = project.MapName;
+        _maxParallelism = Math.Max(1, project.Import.MaxParallelism);
 
         var paths = new ImportPaths(project.S2GameInfoDir, addon, originalMapName);
 
@@ -184,41 +187,50 @@ public sealed partial class MapImportService
         }
 
         var s2Content = paths.S2ContentCsgoImported;
-        var mdlMtls = new HashSet<string>(StringComparer.Ordinal);
-        var extraOptions = "";
 
-        // Import each model, collect its material refs.
+        // Resolve each model's extra options sequentially first ("-…" lines apply
+        // to the models that follow), so the imports themselves can run in parallel.
+        var modelJobs = new List<(string Mdl, string Options)>();
+        var extraOptions = "";
         foreach (var entry in mdlFiles)
         {
             if (entry.StartsWith('-'))
-            {
                 extraOptions = entry is "-" or "-nooptions" ? "" : entry;
-                continue;
-            }
-
-            var mdlFile = entry.Replace('/', '\\');
-            var refsName = Path.Combine(s2Content, mdlFile.Replace(".mdl", "_refs.txt"));
-
-            var importArgs = $"-nop4 {extraOptions} -i \"{s1Game}\" -o \"{s2Content}\" \"{mdlFile}\"".Replace("  ", " ");
-            await RunAsync(_tools.ModelImporter, "cs_mdl_import.exe", importArgs, env, ct, critical: false);
-
-            if (File.Exists(refsName))
-            {
-                var refs = RefsFile.ReadTextFile(refsName);
-                foreach (var mtl in RefsFile.ListStringFromRefs(refs).Split('\n'))
-                    mdlMtls.Add(mtl);
-            }
+            else
+                modelJobs.Add((entry.Replace('/', '\\'), extraOptions));
         }
 
-        // Import the materials used by the models in one filelist.
+        var parallel = new ParallelOptions { MaxDegreeOfParallelism = _maxParallelism, CancellationToken = ct };
+        if (_maxParallelism > 1)
+            OnLog?.Invoke($"Importing {modelJobs.Count} models with up to {_maxParallelism} parallel workers.");
+
+        // (1) Import each model in parallel; collect its material refs thread-safely.
+        // Each cs_mdl_import writes model-specific files (.vmdl + _refs.txt), so the
+        // imports are independent.
+        var mdlMtls = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+        await Parallel.ForEachAsync(modelJobs, parallel, async (job, token) =>
+        {
+            var importArgs = $"-nop4 {job.Options} -i \"{s1Game}\" -o \"{s2Content}\" \"{job.Mdl}\"".Replace("  ", " ");
+            await RunAsync(_tools.ModelImporter, "cs_mdl_import.exe", importArgs, env, token, critical: false);
+
+            var refsName = Path.Combine(s2Content, job.Mdl.Replace(".mdl", "_refs.txt"));
+            if (File.Exists(refsName))
+            {
+                foreach (var mtl in RefsFile.ListStringFromRefs(RefsFile.ReadTextFile(refsName)).Split('\n'))
+                    if (mtl.Length > 0)
+                        mdlMtls.TryAdd(mtl, 0);
+            }
+        });
+
+        // (2) Import the materials used by the models in one filelist (single op).
         var mtlListPath = mdlListPath.Replace("mdl_lst", "mtl_lst");
         RefsFile.EnsureFileWritable(mtlListPath);
-        File.WriteAllText(mtlListPath, RefsFile.RefsStringFromList(mdlMtls));
+        File.WriteAllText(mtlListPath, RefsFile.RefsStringFromList(mdlMtls.Keys));
 
         var importRefsArgs = $"-retail -nop4 -nop4sync -src1gameinfodir \"{s1Game}\" -s2addon {addon} -game csgo -usefilelist \"{mtlListPath}\"";
         await RunAsync(_tools.Source1Import, "source1import.exe", importRefsArgs, env, ct, critical: false);
 
-        // Load the global list of materials we've already forced UV2 on, and re-apply the flag.
+        // (3) Re-apply F_FORCE_UV2 from the global list (sequential — shared file).
         var global2Uv = new HashSet<string>(StringComparer.Ordinal);
         if (File.Exists(_global2UvListPath))
         {
@@ -228,27 +240,22 @@ public sealed partial class MapImportService
                 ForceUv2ForVmat(s2Content, mtl);
             }
         }
-        RefsFile.EnsureFileWritable(_global2UvListPath);
-        using var global2UvWriter = new StreamWriter(_global2UvListPath, append: true);
 
-        // Compile materials explicitly (model compile alone misses some).
-        foreach (var mtl in mdlMtls)
+        // (4) Compile materials in parallel — each writes a unique .vmat_c.
+        var materials = mdlMtls.Keys.Where(m => m.Length > 0 && !m.StartsWith('-')).ToList();
+        await Parallel.ForEachAsync(materials, parallel, async (mtl, token) =>
         {
-            if (mtl.Length == 0 || mtl.StartsWith('-'))
-                continue;
-
             var vmat = Path.Combine(s2Content, mtl.Replace('/', '\\').Replace(".vmt", ".vmat"));
             await RunAsync(_tools.ResourceCompiler, "resourcecompiler.exe",
-                $"-retail -nop4 -game csgo \"{vmat}\"", env, ct, critical: false);
-        }
+                $"-retail -nop4 -game csgo \"{vmat}\"", env, token, critical: false);
+        });
 
-        // Compile models, force-compiling those whose materials need UV2.
-        foreach (var entry in mdlFiles)
+        // (5) Compile models. The 2-UV pass mutates shared state (the global list
+        // and shared .vmat files), so it stays sequential.
+        RefsFile.EnsureFileWritable(_global2UvListPath);
+        using var global2UvWriter = new StreamWriter(_global2UvListPath, append: true);
+        foreach (var (mdlFile, _) in modelJobs)
         {
-            if (entry.StartsWith('-'))
-                continue;
-
-            var mdlFile = entry.Replace('/', '\\');
             var vmdl = Path.Combine(s2Content, mdlFile.Replace(".mdl", ".vmdl"));
             if (!File.Exists(vmdl))
                 continue;

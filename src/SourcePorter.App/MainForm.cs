@@ -18,9 +18,12 @@ public sealed class MainForm : Form
     private readonly TextBox _cs2Dir = new();
     private readonly TextBox _sourceMap = new();
     private readonly TextBox _outputAddon = new();
+    private readonly ComboBox _inputMode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 64 };
     private readonly CheckBox _useBsp = new() { Text = "Use BSP" };
     private readonly CheckBox _noMerge = new() { Text = "Don't merge instances" };
     private readonly CheckBox _skipDeps = new() { Text = "Skip dependencies" };
+    private readonly CheckBox _compileMap = new() { Text = "Compile map" };
+    private readonly NumericUpDown _threads = new() { Minimum = 1, Maximum = 16, Width = 48 };
     private readonly Button _import = new() { Text = "Import" };
     private readonly Button _cancel = new() { Text = "Cancel", Enabled = false };
     private readonly RichTextBox _console = new();
@@ -77,13 +80,20 @@ public sealed class MainForm : Form
         AddField(form, 1, "Source Map", _sourceMap, "Browse…", BrowseSourceMap);
         AddField(form, 2, "Output Addon", _outputAddon, null, null);
 
+        _inputMode.Items.AddRange(["VMF", "BSP"]);
+
         var options = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
-        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = true;
+        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileMap.AutoSize = true;
         _useBsp.CheckedChanged += (_, _) => { if (_useBsp.Checked) _noMerge.Checked = false; };
         _noMerge.CheckedChanged += (_, _) => { if (_noMerge.Checked) _useBsp.Checked = false; };
+        options.Controls.Add(new Label { Text = "Input:", AutoSize = true, Margin = new Padding(0, 6, 2, 3) });
+        options.Controls.Add(_inputMode);
         options.Controls.Add(_useBsp);
         options.Controls.Add(_noMerge);
         options.Controls.Add(_skipDeps);
+        options.Controls.Add(_compileMap);
+        options.Controls.Add(new Label { Text = "Threads:", AutoSize = true, Margin = new Padding(12, 6, 2, 3) });
+        options.Controls.Add(_threads);
         form.Controls.Add(options, 1, 3);
 
         var actions = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
@@ -192,7 +202,14 @@ public sealed class MainForm : Form
 
     private void BrowseSourceMap()
     {
-        using var dlg = new OpenFileDialog { Filter = "Source 1 map (*.vmf)|*.vmf|All files (*.*)|*.*", Title = "Select the source .vmf" };
+        var bsp = string.Equals(_inputMode.SelectedItem as string, "BSP", StringComparison.OrdinalIgnoreCase);
+        using var dlg = new OpenFileDialog
+        {
+            Filter = bsp
+                ? "Source 1 BSP (*.bsp)|*.bsp|All files (*.*)|*.*"
+                : "Source 1 map (*.vmf)|*.vmf|All files (*.*)|*.*",
+            Title = bsp ? "Select the source .bsp" : "Select the source .vmf",
+        };
         if (File.Exists(_sourceMap.Text))
             dlg.FileName = _sourceMap.Text;
         if (dlg.ShowDialog(this) == DialogResult.OK)
@@ -206,66 +223,93 @@ public sealed class MainForm : Form
 
     private async Task RunImportAsync()
     {
+        var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
+        var muted = Themer.CurrentThemeColors.ContrastSoft;
+
         var cs2 = new Cs2Install(_cs2Dir.Text.Trim());
         string? error = _cs2Dir.Text.Trim().Length == 0 ? "Set the CS2 directory."
             : !Directory.Exists(cs2.InstallRoot) ? $"CS2 directory not found: {cs2.InstallRoot}"
             : cs2.IsValid(out var v) ? null : v;
-        if (error is not null)
-        {
-            AppendConsole(error, Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
-            return;
-        }
-        if (!File.Exists(_sourceMap.Text) || !Cs2Install.TryParseSourceMap(_sourceMap.Text, out _, out _))
-        {
-            AppendConsole("Source map must be an existing .vmf inside a 'maps' folder.", Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
-            return;
-        }
-        if (_outputAddon.Text.Trim().Length == 0)
-        {
-            AppendConsole("Enter an output addon name.", Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
-            return;
-        }
+        if (error is not null) { AppendConsole(error, red); return; }
+
+        var source = _sourceMap.Text.Trim();
+        if (source.Length == 0 || !File.Exists(source)) { AppendConsole("Source map file not found.", red); return; }
+        if (_outputAddon.Text.Trim().Length == 0) { AppendConsole("Enter an output addon name.", red); return; }
 
         SaveSettings(); // persist the inputs before a long-running import
 
-        var project = cs2.BuildProject(_sourceMap.Text.Trim(), _outputAddon.Text.Trim(), new ImportOptions
-        {
-            UseBsp = _useBsp.Checked,
-            UseBspNoMergeInstances = _noMerge.Checked,
-            SkipDeps = _skipDeps.Checked,
-        });
-
+        var bspMode = string.Equals(_inputMode.SelectedItem as string, "BSP", StringComparison.OrdinalIgnoreCase);
+        var addon = _outputAddon.Text.Trim();
         var runner = new ProcessRunner();
-        var service = new MapImportService(cs2.Tools, runner, AppPaths.ImportScriptsDir);
-        service.OnLog += LogFromWorker;
+        MapImportService? service = null;
 
         SetRunning(true);
-        SetStatus($"Importing {project.MapName} → {project.AddonName}…");
         _cts = new CancellationTokenSource();
         try
         {
+            // BSP input: decompile to a .vmf next to it first, then import that.
+            var vmf = source;
+            if (bspMode)
+            {
+                vmf = Path.ChangeExtension(source, ".vmf");
+                AppendConsole($"Decompiling {Path.GetFileName(source)} → {Path.GetFileName(vmf)}…", muted);
+                var decompiler = new BspDecompiler(runner);
+                decompiler.OnLog += LogFromWorker;
+                try { await Task.Run(() => decompiler.DecompileAsync(source, vmf, _cts.Token)); }
+                finally { decompiler.OnLog -= LogFromWorker; }
+            }
+
+            if (!Cs2Install.TryParseSourceMap(vmf, out _, out _))
+            {
+                AppendConsole("Source map must be inside a 'maps' folder.", red);
+                return;
+            }
+
+            var project = cs2.BuildProject(vmf, addon, new ImportOptions
+            {
+                UseBsp = _useBsp.Checked,
+                UseBspNoMergeInstances = _noMerge.Checked,
+                SkipDeps = _skipDeps.Checked,
+                MaxParallelism = (int)_threads.Value,
+            });
+
+            service = new MapImportService(cs2.Tools, runner, ResolveImportScriptsDir(cs2));
+            service.OnLog += LogFromWorker;
+
+            SetStatus($"Importing {project.MapName} → {addon}…");
             await Task.Run(() => service.ImportAsync(project, _cts.Token));
-            AppendConsole($"Done. Imported {project.MapName} into addon '{project.AddonName}'.", Themer.CurrentThemeColors.Accent);
+
+            if (_compileMap.Checked)
+            {
+                AppendConsole($"Compiling {project.MapName} → .vmap_c…", muted);
+                await Task.Run(() => service.CompileMapAsync(project, _cts.Token));
+            }
+
+            AppendConsole($"Done. Imported {project.MapName} into addon '{addon}'.", Themer.CurrentThemeColors.Accent);
             SetStatus("Import complete.");
         }
         catch (OperationCanceledException)
         {
-            AppendConsole("Import cancelled.", Themer.CurrentThemeColors.ContrastSoft);
+            AppendConsole("Import cancelled.", muted);
             SetStatus("Cancelled.");
         }
         catch (Exception ex)
         {
-            AppendConsole(ex.Message, Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
+            AppendConsole(ex.Message, red);
             SetStatus("Import failed.");
         }
         finally
         {
-            service.OnLog -= LogFromWorker;
+            if (service is not null) service.OnLog -= LogFromWorker;
             _cts.Dispose();
             _cts = null;
             SetRunning(false);
         }
     }
+
+    // source1import needs its real home dir as cwd (config lists + ./bin/vbsp.exe).
+    private static string ResolveImportScriptsDir(Cs2Install cs2) =>
+        Directory.Exists(cs2.ImportScriptsDir) ? cs2.ImportScriptsDir : AppPaths.ImportScriptsDir;
 
     private async Task RunValidateAsync()
     {
@@ -342,6 +386,7 @@ public sealed class MainForm : Form
         _import.Enabled = !running;
         _cancel.Enabled = running;
         _cs2Dir.Enabled = _sourceMap.Enabled = _outputAddon.Enabled = !running;
+        _inputMode.Enabled = _threads.Enabled = !running;
     }
 
     private void AppendConsole(string text, Color color)
@@ -377,6 +422,9 @@ public sealed class MainForm : Form
         _useBsp.CheckedChanged += (_, _) => SaveSettings();
         _noMerge.CheckedChanged += (_, _) => SaveSettings();
         _skipDeps.CheckedChanged += (_, _) => SaveSettings();
+        _compileMap.CheckedChanged += (_, _) => SaveSettings();
+        _inputMode.SelectedIndexChanged += (_, _) => SaveSettings();
+        _threads.ValueChanged += (_, _) => SaveSettings();
     }
 
     private void SaveSettings() => CaptureSettings().Save();
@@ -389,6 +437,9 @@ public sealed class MainForm : Form
         _useBsp.Checked = _settings.UseBsp;
         _noMerge.Checked = _settings.UseBspNoMergeInstances;
         _skipDeps.Checked = _settings.SkipDeps;
+        _compileMap.Checked = _settings.CompileMap;
+        _inputMode.SelectedItem = _inputMode.Items.Contains(_settings.InputMode) ? _settings.InputMode : "VMF";
+        _threads.Value = Math.Clamp(_settings.Threads, (int)_threads.Minimum, (int)_threads.Maximum);
     }
 
     private AppSettings CaptureSettings() => new()
@@ -399,5 +450,8 @@ public sealed class MainForm : Form
         UseBsp = _useBsp.Checked,
         UseBspNoMergeInstances = _noMerge.Checked,
         SkipDeps = _skipDeps.Checked,
+        CompileMap = _compileMap.Checked,
+        InputMode = _inputMode.SelectedItem as string ?? "VMF",
+        Threads = (int)_threads.Value,
     };
 }

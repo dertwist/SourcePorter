@@ -16,6 +16,15 @@ public sealed class AppSettings
     public bool UseBspNoMergeInstances { get; set; }
     public bool SkipDeps { get; set; }
 
+    /// <summary>"VMF" or "BSP" — the source map input type.</summary>
+    public string InputMode { get; set; } = "VMF";
+
+    /// <summary>Max concurrent tool processes for the dependency phase.</summary>
+    public int Threads { get; set; } = 4;
+
+    /// <summary>Compile the imported .vmap to .vmap_c after import (slow lighting bake).</summary>
+    public bool CompileMap { get; set; }
+
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
 
     private static string Path =>

@@ -22,9 +22,9 @@ try
 {
     return args[0].ToLowerInvariant() switch
     {
-        "port" => await Port(args[1], args[2], args[3], NoBsp(args), compile: args.Contains("--compile")),
+        "port" => await Port(args[1], args[2], args[3], NoBsp(args), args.Contains("--compile"), Threads(args)),
         "validate" => Validate(args[1], args[2]),
-        "batch" => await Batch(args[1], args[2], Limit(args), NoBsp(args), compile: args.Contains("--compile")),
+        "batch" => await Batch(args[1], args[2], Limit(args), NoBsp(args), args.Contains("--compile"), Threads(args)),
         _ => Fail($"unknown command '{args[0]}'"),
     };
 }
@@ -40,9 +40,14 @@ static int Limit(string[] a)
     var i = Array.IndexOf(a, "--limit");
     return i >= 0 && i + 1 < a.Length && int.TryParse(a[i + 1], out var n) ? n : int.MaxValue;
 }
+static int Threads(string[] a)
+{
+    var i = Array.IndexOf(a, "--threads");
+    return i >= 0 && i + 1 < a.Length && int.TryParse(a[i + 1], out var n) && n >= 1 ? n : 4;
+}
 static int Fail(string m) { Console.Error.WriteLine(m); return 2; }
 
-static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool noBsp, bool compile)
+static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool noBsp, bool compile, int threads)
 {
     var cs2 = new Cs2Install(cs2Dir);
     if (!cs2.IsValid(out var err)) { Console.Error.WriteLine(err); return 1; }
@@ -59,7 +64,7 @@ static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool 
         await decompiler.DecompileAsync(sourceMap, vmf);
     }
 
-    var project = cs2.BuildProject(vmf, addon, new ImportOptions());
+    var project = cs2.BuildProject(vmf, addon, new ImportOptions { MaxParallelism = threads });
     var service = new MapImportService(cs2.Tools, runner, ResolveImportScriptsDir(cs2));
     service.OnLog += Console.WriteLine;
 
@@ -90,10 +95,10 @@ static int Validate(string cs2Dir, string addon)
     return report.HasIssues ? 1 : 0;
 }
 
-static async Task<int> Batch(string cs2Dir, string mapsDir, int limit, bool noBsp, bool compile)
+static async Task<int> Batch(string cs2Dir, string mapsDir, int limit, bool noBsp, bool compile, int threads)
 {
     var maps = Directory.EnumerateFiles(mapsDir, "*.vmf").Take(limit).ToList();
-    Console.WriteLine($"Batch porting {maps.Count} map(s) from {mapsDir} (compile={compile})");
+    Console.WriteLine($"Batch porting {maps.Count} map(s) from {mapsDir} (compile={compile}, threads={threads})");
 
     var results = new List<string>();
     foreach (var map in maps)
@@ -102,7 +107,7 @@ static async Task<int> Batch(string cs2Dir, string mapsDir, int limit, bool noBs
         var addon = $"{name}_test";
         try
         {
-            var code = await Port(cs2Dir, map, addon, noBsp, compile);
+            var code = await Port(cs2Dir, map, addon, noBsp, compile, threads);
             results.Add($"{name}: {(code == 0 ? "CLEAN" : "ISSUES")}");
         }
         catch (Exception ex)

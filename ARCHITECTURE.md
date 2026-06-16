@@ -115,8 +115,14 @@ match the Python.
 - [`MapImportService`](src/SourcePorter.Core/Toolchain/MapImportService.cs) — the
   orchestration: `ImportAsync` mirrors `main()`, with `StripMDLsFromRefs`,
   `ImportAndCompileMapMDLs`, `ImportAndCompileMapRefs`, `ForceUV2ForVMAT`, and
-  `Force2UVsIfRequired` ported faithfully; non-zero tool exits abort with
-  `ImportToolException` (mirroring `utlc.Error`).
+  `Force2UVsIfRequired` ported faithfully. Per-asset tool failures are warnings;
+  only the map import is fatal (`ImportToolException`). `CompileMapAsync` compiles
+  the imported `.vmap` to `.vmap_c`.
+- **Concurrency:** the dependency phase runs model import (`cs_mdl_import`) and
+  material compile (`resourcecompiler`) in parallel via `Parallel.ForEachAsync`,
+  bounded by `ImportOptions.MaxParallelism` (default 4; 1 = sequential). The 2-UV
+  model-compile pass stays sequential — it mutates the shared 2-UV list and shared
+  `.vmat` files. Exposed as CLI `--threads N` and a GUI Threads spinner.
 
 The import sequence we reproduce, in order:
 
