@@ -7,12 +7,13 @@
 
   <ItemGroup>
     <!--
-      Source 2 asset library (VPK, KV3, VMAP/VMDL/VMAT, textures, sounds).
-      Pinned to 15.0.4937 — the newest release that targets net9.0.
-      Newer builds (>=16) require the .NET 10 SDK; bump this together with
-      the TargetFramework once the net10 SDK is installed. See ARCHITECTURE.md.
+      VPK archive reader and KeyValues (KV1/KV3) reader used by the asset
+      validator. Versions are the newest that still target net8.0/netstandard
+      (ValveKeyValue >= 0.21 and newer ValvePak require the .NET 10 SDK; bump
+      both together with TargetFramework once net10 SDK is installed).
     -->
-    <PackageReference Include="ValveResourceFormat" Version="15.0.4937" />
+    <PackageReference Include="ValvePak" Version="4.0.0.142" />
+    <PackageReference Include="ValveKeyValue" Version="0.20.0.417" />
   </ItemGroup>
 
 </Project>

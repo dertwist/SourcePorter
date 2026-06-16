@@ -84,3 +84,6 @@ sourceporter.local.json
 /samples/**/game/
 *.vpk
 *_c
+
+# Local read-only reference clones (e.g. ValveResourceFormat source)
+/reference/

@@ -4,10 +4,11 @@
 automates porting **Source 1 maps** (Counter-Strike: Global Offensive, and by
 extension Counter-Strike: Source) into **Source 2** (Counter-Strike 2).
 
-It is built around the workflow documented in the community
-**S2ZE — Map Porting Guide** and Valve's own `import_map_community` toolchain,
-wrapping them in a single themed, observable, resumable pipeline instead of a
-loose collection of Python scripts, console windows, and manual Hammer steps.
+At its core it is a **themed front-end over Valve's `import_map_community`
+toolchain** — it drives `source1import` exactly as the `import_scripts` shipped
+with CS2 do, but with a real UI, a live console, and bundled configs so it runs
+standalone. The broader S2ZE porting workflow (post-import fix-ups, asset audit,
+packaging) is layered on later as optional tools.
 
 ## Why it exists
 
@@ -25,20 +26,19 @@ Porting a CS:GO map to CS2 today means:
 - Editing `gameinfo.gi` whitelists and packing the addon into a `.vpk` for the
   Steam Workshop.
 
-SourcePorter turns that into a staged tool: configure the project once, watch
-each step run with full captured logs, review and one-click-apply the
-guide's known fix-ups, audit assets against the base CS2 archives, and pack the
-result — all in an interface styled after the **Source 2 Viewer**.
+SourcePorter replaces the console invocation with a single window: set the CS2
+directory, the source `.vmf`, and the output addon, press **Import**, and watch
+the full toolchain run with captured, colour-coded output — styled after the
+**Source 2 Viewer**. A Reference window explains the fields and links the guide's
+tools; a Configs Editor edits Valve's bundled `source1import_*.txt` lists.
 
 ## What it is and is not
 
-- **It is** an orchestrator, analyzer, and fix-up assistant. It drives Valve's
-  official import tools, reads and rewrites the resulting files, and surfaces a
-  checklist of everything the guide says to do.
-- **It is not** a replacement for Hammer. Steps that genuinely require the
-  Source 2 Hammer editor (placing cubemap volumes, collapsing prefabs, building
-  lighting) are surfaced as guided, checkable instructions — not silently
-  skipped and not faked.
+- **It is** a faithful, themed runner for Valve's import toolchain — same command
+  sequence and configs as `import_scripts`, just usable.
+- **It is not** a replacement for Hammer. The guide's post-import fix-ups,
+  asset audit, and packaging are deliberately out of scope for the importer;
+  they're optional future tools, never silent automation of manual Hammer work.
 
 ## Audience
 

@@ -1,30 +1,39 @@
 # SourcePorter
 
-A Windows desktop tool that **guides and automates porting Source 1 maps
-(CS:GO / CS:S) to Source 2 (Counter-Strike 2)**.
+A Windows desktop tool for **porting Source 1 maps (CS:GO / CS:S) to Source 2
+(Counter-Strike 2)**.
 
-SourcePorter wraps Valve's `import_map_community` toolchain and the
-[ValveResourceFormat](https://github.com/ValveResourceFormat/ValveResourceFormat)
-library in one themed, observable pipeline, and automates the fix-ups from the
-community **S2ZE Map Porting Guide** — replacing a loose set of Python scripts,
-log-less console windows, and manual Hammer chores with a single staged
-application styled after the [Source 2 Viewer](https://s2v.app/).
+SourcePorter is a self-contained, themed front-end over Valve's
+`import_map_community` toolchain — it drives `source1import` exactly as the
+`import_scripts` shipped with CS2 do, but with a proper UI, a live console, and
+the [Source 2 Viewer](https://s2v.app/) look. Valve's importer configs are
+bundled, so it works standalone.
 
-> **Status:** Phase 0 (foundation) complete — buildable, themed skeleton.
-> See [ROADMAP.md](ROADMAP.md) for what ships next.
+> **Status:** importer working (builds, themed, runs); pending a real
+> end-to-end run on a CS2 install. See [ROADMAP.md](ROADMAP.md).
 
-## What it does (when complete)
+## What it does
 
-Configure a project once, then walk the stages:
+Point it at three things and press **Import**:
 
-**Project → Stripper → Pre-import → Import → Post-import → Entities → Assets →
-Polish → Package**
+- **CS2 Directory** — your Counter-Strike 2 install root.
+- **Source Map** — the Source 1 `.vmf` to port.
+- **Output Addon** — the target CS2 addon name.
 
-Each stage either does the work for you, prepares it for one-click confirmation,
-or surfaces the guide's instructions as a checklist for the steps that genuinely
-need Hammer. The import runs with full captured logs; known fatal foot-guns
-(missing-material crashes, the `vpk.signatures` read bug) are detected and
-handled. See [overview.md](overview.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+It derives the rest, runs the full `source1import` → `cs_mdl_import` →
+`resourcecompiler` sequence (with the 2-UV `F_FORCE_UV2` handling and re-import
+pass), and streams the output to the console. Two helper windows:
+
+- **Reference** — what each field means + the porting guide's useful links/tools.
+- **Configs Editor** — edit Valve's bundled `source1import_*.txt` config lists.
+
+**Tools → Validate Addon** checks the compiled addon's `.vmap_c`/`.vmdl_c`/
+`.vmat_c` for missing referenced files — reading external references via a small
+RERL reader, resolving them across the base VPKs with
+[ValvePak](https://www.nuget.org/packages/ValvePak), and reading `gameinfo.gi`
+with [ValveKeyValue](https://www.nuget.org/packages/ValveKeyValue).
+
+See [overview.md](overview.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Prerequisites
 
@@ -48,19 +57,22 @@ In VS Code, the same operations are available as tasks
 ## Project layout
 
 ```
-src/SourcePorter.Core   Headless porting logic (no UI) — pipeline, toolchain, formats.
-src/SourcePorter.App     WinForms front-end + Source 2 Viewer theme.
+src/SourcePorter.Core   Headless import logic (no UI) — toolchain port + Cs2Install.
+src/SourcePorter.App     WinForms front-end + Source 2 Viewer theme/icons.
+tools/import_scripts     Valve's source1import configs + scripts (bundled).
 tests/…                  xUnit tests for Core.
 ```
 
-`SourcePorter.Core` never references WinForms, so the fragile logic (entity
-remapping, VMAP rewriting, orchestration) stays unit-testable.
+`SourcePorter.Core` never references WinForms, so the import orchestration stays
+unit-testable.
 
 ## Notes
 
-- ValveResourceFormat is pinned to **15.0.4937** (the last `net9.0` build);
-  newer releases need the .NET 10 SDK. See
+- `ValveKeyValue` is pinned to **0.20.0.417** and `ValvePak` to **4.0.0.142**
+  (the newest net8-compatible builds; later ones need the .NET 10 SDK). See
   [ARCHITECTURE.md §1](ARCHITECTURE.md).
+- A read-only clone of ValveResourceFormat sits in `reference/` (git-ignored),
+  used to learn the resource/RERL format — not a build dependency.
 - **Never** commit real maps or game assets — they are git-ignored, and tests
   use synthetic fixtures only.
 - Contributing? Read [AGENTS.md](AGENTS.md) first.
@@ -68,7 +80,9 @@ remapping, VMAP rewriting, orchestration) stays unit-testable.
 ## Credits & licences
 
 - [ValveResourceFormat / Source 2 Viewer](https://github.com/ValveResourceFormat/ValveResourceFormat)
-  (MIT) — Source 2 asset library, the dark theme (`Themer.cs`, ported 1:1), and
-  the UI icons (`GUI/Icons/*.svg`, embedded under `src/SourcePorter.App/Icons/`).
+  (MIT) — the dark theme (`Themer.cs`, ported 1:1), the UI icons
+  (`GUI/Icons/*.svg`), and the resource/RERL format the validator reads.
+- [ValvePak](https://www.nuget.org/packages/ValvePak) (MIT) — VPK reading.
+- [ValveKeyValue](https://www.nuget.org/packages/ValveKeyValue) (MIT) — KV reading.
 - The S2ZE community and the Map Porting Guide for the porting workflow this
   tool automates.

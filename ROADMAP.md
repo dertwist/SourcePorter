@@ -1,9 +1,9 @@
 # Roadmap
 
-The full guided pipeline, built in phases. Each phase is independently useful
-and shippable. Stage names refer to
-[`PortStage`](src/SourcePorter.Core/Pipeline/PortStage.cs); guide § references
-point at the S2ZE Map Porting Guide.
+SourcePorter's core is a **self-contained importer** that runs Valve's
+`source1import` toolchain like `import_scripts`. That importer is the product;
+the guide's post-import work is layered on later as optional tools. Guide §
+references point at the S2ZE Map Porting Guide.
 
 Status legend: ✅ done · 🔨 in progress · ⬜ not started
 
@@ -11,143 +11,85 @@ Status legend: ✅ done · 🔨 in progress · ⬜ not started
 
 ## Phase 0 — Foundation ✅
 
-Repository, solution skeleton, theme, and tooling so every later phase has a
-green build to land on.
-
 - ✅ Solution: `Core` (net9.0) + `App` (net9.0-windows WinForms) + xUnit tests.
 - ✅ ValveResourceFormat pinned (15.0.4937, the last net9.0 build).
 - ✅ Source 2 Viewer theme ported **1:1** from VRF `Themer.cs`
   (exact palette + `Application.SetColorMode` + `DarkToolStripRenderer`).
-- ✅ Source 2 Viewer SVG icons embedded + rendered via Svg.Skia
-  (`Themer.GetIcon`); stage navigator + console use them.
-- ✅ `MainForm` shell: stage navigator + work area + dark console + status bar.
-- ✅ `ProcessRunner` (streaming, cancellable) and `ValveToolLocator`.
-- ✅ Import orchestration ported **1:1** from `import_map_community.py` +
-  `utlc.py` (`RefsFile`, `ImportPaths`, `MapImportService`) — not yet UI-wired.
+- ✅ Source 2 Viewer SVG icons embedded + rendered via Svg.Skia (`Themer.GetIcon`).
 - ✅ VS Code tasks (build/rebuild/restore/clean/run/test/publish) + launch.
 - ✅ `.gitignore`, `.editorconfig`, `global.json`, `Directory.Build.props`.
 
-**Acceptance:** `dotnet build` and `dotnet test` are green; the app launches
-themed. *(met)*
+---
+
+## Phase 1 — The importer ✅
+
+The focused GUI that mirrors `import_scripts`.
+
+- ✅ Import orchestration ported **1:1** from `import_map_community.py` +
+  `utlc.py` (`RefsFile`, `ImportPaths`, `MapImportService`,
+  `ProcessRunner`, `ValveToolLocator`).
+- ✅ Valve's `source1import_*.txt` configs bundled (`tools/import_scripts/`),
+  shipped beside the exe and used as the importer working dir.
+- ✅ GUI: CS2 directory, source `.vmf`, output addon, BSP/skip-deps options,
+  **Import**/**Cancel**, live colour-coded console; inputs persisted
+  (`AppSettings`).
+- ✅ `Cs2Install` derives the four importer paths from the three inputs.
+- ✅ **Reference** window (field help + guide links) and **Configs Editor**
+  window (edit the bundled `source1import_*.txt`).
+
+**Acceptance:** SourcePorter imports a real CS:GO map to a CS2 addon, output
+streamed to the console, matching the Python tool. *(pending a real end-to-end
+run on a CS2 install — wiring and arg construction verified.)*
 
 ---
 
-## Phase 1 — Project setup & tool validation ⬜
+## Phase 2 — Importer hardening ⬜
 
-Make the **Project** stage real.
-
-- ⬜ `Config/`: load/save `sourceporter.json` + per-machine `sourceporter.local.json`.
-- ⬜ Project view: the five path/name fields (mirroring Valve's importer GUI)
-  with folder pickers and inline validation.
-- ⬜ Validate the five Valve tools via `ValveToolLocator`; show a clear
-  red/green checklist.
-- ⬜ Pre-flight checks: `gameinfo.gi` `ErrorMaterialIsFatalError` warning (§-1.2)
-  and `vpk.signatures` detection (§-1.1).
-- ⬜ Recent-projects list.
-
-**Acceptance:** a valid project can be created, persisted, reopened, and its
-toolchain verified — no import yet.
-
----
-
-## Phase 2 — Import orchestration ⬜
-
-Make the **Import** stage real — the heart of the app.
-
-- ⬜ `Pipeline/` engine: steps, `StepResult`, progress, cancellation, log sink.
-- ✅ Re-implement `import_map_community.py` end-to-end using `ProcessRunner`
-  (vmf→vmap, MDL strip, model import + 2-UV force, ref import, recompile,
-  re-import, copy to `maps/`). Set `VALVE_NO_AUTO_P4=1`. *(in `MapImportService`)*
-- ⬜ Wire `MapImportService` to the Import view: bind its output to the console,
-  surface progress/cancellation, run a real map end-to-end.
-- ⬜ Import options UI (`-usebsp` / `-usebsp_nomergeinstances` / `-skipdeps`)
-  with the same mutual-exclusion as the original GUI.
-- ⬜ Live dark console bound to subprocess output; full run saved to a log file.
+- ⬜ Real end-to-end run against a CS2 install; reconcile any arg/path
+  differences with the Python tool.
 - ⬜ Auto-detect the `vpk.signatures` read failure and offer the rename
-  workaround (and undo).
-
-**Acceptance:** SourcePorter imports a real CS:GO map to a CS2 addon with
-captured logs, matching the Python tool's output.
-
----
-
-## Phase 3 — VMF pre-import analysis ⬜
-
-Make **Stripper** + **PreImport** real (operate on `.vmf` before importing).
-
-- ⬜ `Vmf/`: KeyValues1 reader/writer with faithful round-trip.
-- ⬜ `Stripper/`: parse stripper `.cfg`, apply add/remove/modify, tag changed
-  entities `"strippered" "1"` (§1.1).
-- ⬜ PreImport scanners (§1.2.1): broken/wildcard/reserved (`!self`…) outputs;
-  `HINT`/`SKIP` textures on func ents; `func_wall`/`func_wall_toggle`; surf
-  ramps; HDR 2D skybox.
-- ⬜ One-click fixes where safe (surf ramps → `func_brush`, `HINT`/`SKIP` →
-  `NODRAW`) with `.bak` backups; report the rest.
-
-**Acceptance:** a stripper-dependent map is fixed up and validated pre-import,
-with a clear report of remaining manual work.
+  workaround/undo (§-1.1).
+- ⬜ Pre-flight `ErrorMaterialIsFatalError` warning (§-1.2).
+- ⬜ Save each run's full log to a file; confirmation prompt before overwriting
+  existing addon content.
+- ⬜ Tests: `Cs2Install` path/source-map derivation; orchestration vs a fake tool.
 
 ---
 
-## Phase 4 — Post-import .vmap fix-ups & entity remapping ⬜
+## Phase 3 — Asset validation 🔨
 
-Make **PostImport** + **Entities** real (operate on the imported `.vmap`).
+Check a compiled addon for errors / missing files. Built on **ValvePak** +
+**ValveKeyValue** + a small VRF-derived RERL reader (`Validation/`).
 
-- ⬜ `Vmap/`: load/save KV3 entity lump via VRF, with backups.
-- ⬜ PostImport (§1.2.3): strip `(null)` output params; delete duplicate origin
-  meshes (preserve `env_sky`); flag overlay orientation/scale & `func_wall`
-  duplicates.
-- ⬜ `Entities/`: embedded JSON remap ruleset + engine (rename/replace/addoutput/
-  flag) covering §1.3–1.4; report unfixables with guide links.
-
-**Acceptance:** an imported `.vmap` opens in S2 Hammer with no `(null)` params,
-no stray origin meshes, and known entities remapped.
-
----
-
-## Phase 5 — Asset audit ⬜
-
-Make the **Assets** stage real.
-
-- ⬜ Parse `_refs.txt`/`_mdl_lst.txt`; detect missing textures (the fatal error,
-  §-1.2).
-- ⬜ Open base CS2 `pak_dir.vpk` via VRF; flag imported assets duplicating
-  native ones (§2.4).
-- ⬜ Replicate 2-UV `F_FORCE_UV2` detection/maintenance.
-- ⬜ Flag foliage models that lose `env_wind` sway.
-
-**Acceptance:** a per-map report of missing textures, removable duplicates, and
-2-UV/foliage issues.
+- ✅ Read `.vmap_c`/`.vmdl_c`/`.vmat_c` external references (RERL) and verify each
+  resolves in the addon or a mounted base VPK; report missing / unreadable.
+  **Tools → Validate Addon**; verified end-to-end on real addons.
+- ⬜ Dedupe vs base CS2 (Overridden/Read-Only, §2.4); 2-UV `F_FORCE_UV2` checks;
+  foliage wind-sway flags; parse `mat_print_error_materials` (§-1.2).
+- ⬜ A dedicated results window (grouped by resource, jump-to-file) instead of the
+  console dump.
 
 ---
 
-## Phase 6 — Polish checklist & packaging ⬜
+## Future — optional post-import tools ⬜
 
-Make **Polish** + **Package** real.
+The guide's later fix-ups, layered on **only if** we grow beyond importer +
+validation. Each is a separate, opt-in tool — never silent automation of manual
+Hammer steps.
 
-- ⬜ Polish: interactive checklist for cubemaps/light probes, soundevents,
-  minimap, nav, loading screen, ZR `zr_toggle_respawn` (§1.6–1.17), each with
-  guide text and completion state saved in the project.
-- ⬜ `Packaging/`: parse/edit `gameinfo.gi` whitelist; copy addon, exclude
-  `.los`/unused, build `.vpk` (vpk.exe or VRF); link to Workshop Manager.
-
-**Acceptance:** a finished addon is packed to a clean `.vpk` ready for the
-Workshop.
-
----
-
-## Phase 7 — Quality & release ⬜
-
-- ⬜ Broaden unit coverage (vmf round-trip, rules, whitelist, 2-UV).
-- ⬜ App icon + branding; single-file `win-x64` publish via the `publish` task.
-- ⬜ Sample synthetic fixtures and an end-to-end smoke test against a fake tool.
-- ⬜ User-facing docs / quick-start.
+- ⬜ **VMF pre-import analysis** (§1.1–1.2.1): stripper `.cfg` application;
+  scan for broken/reserved outputs, `HINT`/`SKIP`, `func_wall`, surf ramps.
+- ⬜ **Post-import `.vmap` fix-ups** (§1.2.3): strip `(null)` params, delete
+  origin meshes (the uncompiled `.vmap` is DMX — needs a Datamodel reader).
+- ⬜ **Entity remapping** (§1.3–1.4): data-driven S1→S2 rules + report.
+- ⬜ **Packaging** (§1.18): `gameinfo.gi` whitelist edit, `.los`/unused exclusion,
+  `.vpk` build.
 
 ---
 
-## Cross-cutting (every phase)
+## Cross-cutting
 
 - Keep `Core` free of WinForms; keep logic unit-testable.
-- Back up before overwriting; never commit real maps or game assets.
+- Never commit real maps or game assets.
 - Update [ARCHITECTURE.md](ARCHITECTURE.md) when a subsystem's shape changes.
 - Re-pin VRF + `TargetFramework` to net10 once the .NET 10 SDK is installed.

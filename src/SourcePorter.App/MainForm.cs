@@ -1,6 +1,7 @@
 using SourcePorter.App.Theme;
 using SourcePorter.Core.Domain;
 using SourcePorter.Core.Toolchain;
+using SourcePorter.Core.Validation;
 
 namespace SourcePorter.App;
 
@@ -38,8 +39,9 @@ public sealed class MainForm : Form
 
         BuildLayout();
         ApplySettingsToUi();
+        WireSettingsPersistence();
         Themer.ApplyTheme(this);
-        FormClosing += (_, _) => CaptureSettings().Save();
+        FormClosing += (_, _) => SaveSettings();
 
         AppendConsole($"SourcePorter v{Application.ProductVersion}", Themer.CurrentThemeColors.Accent);
         AppendConsole("Set the CS2 directory and a source .vmf, then press Import.", Themer.CurrentThemeColors.ContrastSoft);
@@ -50,8 +52,10 @@ public sealed class MainForm : Form
         // --- menu ---
         var menu = new MenuStrip { Renderer = new DarkToolStripRenderer(new CustomColorTable()) };
         var tools = new ToolStripMenuItem("&Tools");
-        tools.DropDownItems.Add("&Reference…", null, (_, _) => new ReferenceForm().Show(this));
-        tools.DropDownItems.Add("&Configs Editor…", null, (_, _) => new ConfigsEditorForm().Show(this));
+        tools.DropDownItems.Add("&Validate Addon…", Themer.GetIcon("Recover", 16), async (_, _) => await RunValidateAsync());
+        tools.DropDownItems.Add(new ToolStripSeparator());
+        tools.DropDownItems.Add("&Reference…", Themer.GetIcon("Find", 16), (_, _) => new ReferenceForm().Show(this));
+        tools.DropDownItems.Add("&Configs Editor…", Themer.GetIcon("Settings", 16), (_, _) => new ConfigsEditorForm().Show(this));
         var file = new ToolStripMenuItem("&File");
         file.DropDownItems.Add("E&xit", null, (_, _) => Close());
         menu.Items.Add(file);
@@ -83,8 +87,12 @@ public sealed class MainForm : Form
         form.Controls.Add(options, 1, 3);
 
         var actions = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
-        _import.Width = 110;
+        _import.Width = 120;
         _import.Height = 30;
+        _import.Image = Themer.GetIcon("Decompile", 16);
+        _import.ImageAlign = ContentAlignment.MiddleLeft;
+        _import.TextAlign = ContentAlignment.MiddleRight;
+        _import.TextImageRelation = TextImageRelation.ImageBeforeText;
         _import.Click += async (_, _) => await RunImportAsync();
         _cancel.Width = 90;
         _cancel.Height = 30;
@@ -100,14 +108,7 @@ public sealed class MainForm : Form
         _console.Font = new Font("Cascadia Mono", 9f);
         var consoleHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10, 4, 10, 8) };
         consoleHost.Controls.Add(_console);
-        consoleHost.Controls.Add(new Label
-        {
-            Text = "CONSOLE",
-            Dock = DockStyle.Top,
-            Height = 22,
-            TextAlign = ContentAlignment.MiddleLeft,
-            ForeColor = Themer.CurrentThemeColors.ContrastSoft,
-        });
+        consoleHost.Controls.Add(BuildConsoleHeader());
 
         _statusLabel.Spring = true;
         _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
@@ -143,13 +144,50 @@ public sealed class MainForm : Form
         }
     }
 
+    private Panel BuildConsoleHeader()
+    {
+        var header = new Panel { Dock = DockStyle.Top, Height = 24 };
+
+        var logIcon = new PictureBox
+        {
+            Dock = DockStyle.Left,
+            Width = 22,
+            SizeMode = PictureBoxSizeMode.CenterImage,
+            Image = Themer.GetIcon("Log", 16),
+        };
+        var title = new Label
+        {
+            Text = "CONSOLE",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = Themer.CurrentThemeColors.ContrastSoft,
+        };
+        var clear = new Button
+        {
+            Dock = DockStyle.Right,
+            Width = 30,
+            Image = Themer.GetIcon("ClearLog", 16),
+            FlatStyle = FlatStyle.Flat,
+        };
+        clear.Click += (_, _) => _console.Clear();
+        new ToolTip().SetToolTip(clear, "Clear console");
+
+        header.Controls.Add(title);
+        header.Controls.Add(logIcon);
+        header.Controls.Add(clear);
+        return header;
+    }
+
     private void BrowseCs2Dir()
     {
         using var dlg = new FolderBrowserDialog { Description = "Select the Counter-Strike 2 install directory" };
         if (Directory.Exists(_cs2Dir.Text))
             dlg.SelectedPath = _cs2Dir.Text;
         if (dlg.ShowDialog(this) == DialogResult.OK)
+        {
             _cs2Dir.Text = dlg.SelectedPath;
+            SaveSettings();
+        }
     }
 
     private void BrowseSourceMap()
@@ -162,15 +200,19 @@ public sealed class MainForm : Form
             _sourceMap.Text = dlg.FileName;
             if (_outputAddon.Text.Length == 0)
                 _outputAddon.Text = Path.GetFileNameWithoutExtension(dlg.FileName);
+            SaveSettings();
         }
     }
 
     private async Task RunImportAsync()
     {
         var cs2 = new Cs2Install(_cs2Dir.Text.Trim());
-        if (!Directory.Exists(cs2.InstallRoot) || !cs2.IsValid(out var error))
+        string? error = _cs2Dir.Text.Trim().Length == 0 ? "Set the CS2 directory."
+            : !Directory.Exists(cs2.InstallRoot) ? $"CS2 directory not found: {cs2.InstallRoot}"
+            : cs2.IsValid(out var v) ? null : v;
+        if (error is not null)
         {
-            AppendConsole(error ?? "Set a valid CS2 directory.", Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
+            AppendConsole(error, Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
             return;
         }
         if (!File.Exists(_sourceMap.Text) || !Cs2Install.TryParseSourceMap(_sourceMap.Text, out _, out _))
@@ -183,6 +225,8 @@ public sealed class MainForm : Form
             AppendConsole("Enter an output addon name.", Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
             return;
         }
+
+        SaveSettings(); // persist the inputs before a long-running import
 
         var project = cs2.BuildProject(_sourceMap.Text.Trim(), _outputAddon.Text.Trim(), new ImportOptions
         {
@@ -217,6 +261,65 @@ public sealed class MainForm : Form
         finally
         {
             service.OnLog -= LogFromWorker;
+            _cts.Dispose();
+            _cts = null;
+            SetRunning(false);
+        }
+    }
+
+    private async Task RunValidateAsync()
+    {
+        var cs2 = new Cs2Install(_cs2Dir.Text.Trim());
+        string? error = _cs2Dir.Text.Trim().Length == 0 ? "Set the CS2 directory."
+            : !Directory.Exists(cs2.InstallRoot) ? $"CS2 directory not found: {cs2.InstallRoot}"
+            : cs2.IsValid(out var v) ? null : v;
+        if (error is not null)
+        {
+            AppendConsole(error, Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
+            return;
+        }
+        var addon = _outputAddon.Text.Trim();
+        if (addon.Length == 0)
+        {
+            AppendConsole("Enter the output addon to validate.", Themer.CurrentThemeColors.ControlBoxHighlightCloseButton);
+            return;
+        }
+
+        var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
+        SetRunning(true);
+        SetStatus($"Validating {addon}…");
+        _cts = new CancellationTokenSource();
+        try
+        {
+            var report = await Task.Run(() => new AssetValidator(cs2, addon)
+                .Validate(line => AppendConsole(line, Themer.CurrentThemeColors.ContrastSoft), _cts.Token));
+
+            foreach (var issue in report.Issues)
+                AppendConsole($"  [{issue.Kind}] {issue.Source}  →  {issue.Detail}", red);
+
+            if (report.HasIssues)
+            {
+                AppendConsole($"Validation found {report.MissingCount} missing file(s) and {report.ErrorCount} unreadable resource(s).", red);
+                SetStatus("Validation found issues.");
+            }
+            else
+            {
+                AppendConsole($"Validation passed: {report.ResourcesScanned} resources, {report.ReferencesChecked} references, no missing files.", Themer.CurrentThemeColors.Accent);
+                SetStatus("Validation passed.");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            AppendConsole("Validation cancelled.", Themer.CurrentThemeColors.ContrastSoft);
+            SetStatus("Cancelled.");
+        }
+        catch (Exception ex)
+        {
+            AppendConsole(ex.Message, red);
+            SetStatus("Validation failed.");
+        }
+        finally
+        {
             _cts.Dispose();
             _cts = null;
             SetRunning(false);
@@ -263,6 +366,20 @@ public sealed class MainForm : Form
         else
             _statusLabel.Text = text;
     }
+
+    // Persist user config whenever it changes — not just on close — so it
+    // survives even if the process is killed (FormClosing wouldn't fire).
+    private void WireSettingsPersistence()
+    {
+        _cs2Dir.Leave += (_, _) => SaveSettings();
+        _sourceMap.Leave += (_, _) => SaveSettings();
+        _outputAddon.Leave += (_, _) => SaveSettings();
+        _useBsp.CheckedChanged += (_, _) => SaveSettings();
+        _noMerge.CheckedChanged += (_, _) => SaveSettings();
+        _skipDeps.CheckedChanged += (_, _) => SaveSettings();
+    }
+
+    private void SaveSettings() => CaptureSettings().Save();
 
     private void ApplySettingsToUi()
     {
