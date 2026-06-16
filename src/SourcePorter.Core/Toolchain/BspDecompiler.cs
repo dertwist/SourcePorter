@@ -2,9 +2,10 @@ namespace SourcePorter.Core.Toolchain;
 
 /// <summary>
 /// Decompiles a Source 1 <c>.bsp</c> back to a <c>.vmf</c> using
-/// <a href="https://github.com/ata4/bspsrc/">BSPSource</a> (a Java tool) so it can
-/// then go through the normal VMF import path. Requires Java on PATH and
-/// <c>bspsrc.jar</c> available (it is not bundled — large third-party binary).
+/// <a href="https://github.com/ata4/bspsrc/">BSPSource</a> so it can then go through
+/// the normal VMF import path. BSPSource is bundled as a single self-contained
+/// <c>bspsrc.exe</c> (it carries its own Java runtime), shipped under
+/// <c>tools/bspsrc/</c> next to the app — no system Java is required.
 /// </summary>
 public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation = null)
 {
@@ -18,21 +19,24 @@ public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation =
         if (!File.Exists(bspPath))
             throw new FileNotFoundException("BSP not found.", bspPath);
 
-        var jar = ResolveJar(bspsrcLocation)
+        var exe = ResolveExe(bspsrcLocation)
             ?? throw new FileNotFoundException(
-                "bspsrc.jar not found. Download BSPSource (https://github.com/ata4/bspsrc/releases) " +
-                "and place bspsrc.jar under tools/bspsrc/ (or set its path in settings).");
+                "bspsrc.exe not found. It ships under tools/bspsrc/ next to the app; " +
+                "rebuild it from tools/bspsrc-launcher, or set its path in settings.");
 
         Directory.CreateDirectory(Path.GetDirectoryName(outputVmfPath)!);
 
-        var args = $"-jar \"{jar}\" -o \"{outputVmfPath}\" \"{bspPath}\"";
+        // `bspsrc [OPTIONS] <bsp>...` with `-o <file>` as the .vmf destination.
+        var args = $"-o \"{outputVmfPath}\" \"{bspPath}\"";
         OnLog?.Invoke($"Decompiling {Path.GetFileName(bspPath)} with BSPSource…");
 
         void Forward(ProcessLine line) => OnLog?.Invoke(line.Text);
         runner.OnOutput += Forward;
         try
         {
-            var exit = await runner.RunAsync("java", args, Path.GetDirectoryName(jar), null, null, ct);
+            // BSPSource exits 0 even when a file fails (it logs the error instead), so
+            // the missing-output check below — not the exit code — is the real gate.
+            var exit = await runner.RunAsync(exe, args, Path.GetDirectoryName(exe), null, null, ct);
             if (exit != 0)
                 throw new InvalidOperationException($"BSPSource failed (exit {exit}).");
         }
@@ -42,22 +46,23 @@ public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation =
         }
 
         if (!File.Exists(outputVmfPath))
-            throw new InvalidOperationException($"BSPSource did not produce {outputVmfPath}.");
+            throw new InvalidOperationException(
+                $"BSPSource did not produce {outputVmfPath} — see the log above for the cause.");
     }
 
-    /// <summary>Locates <c>bspsrc.jar</c> from an explicit path/dir, else <c>tools/bspsrc/</c> by the exe.</summary>
-    public static string? ResolveJar(string? location)
+    /// <summary>Locates <c>bspsrc.exe</c> from an explicit path/dir, else <c>tools/bspsrc/</c> by the exe.</summary>
+    public static string? ResolveExe(string? location)
     {
         if (!string.IsNullOrWhiteSpace(location))
         {
             if (File.Exists(location))
                 return location;
-            var inDir = Path.Combine(location, "bspsrc.jar");
+            var inDir = Path.Combine(location, "bspsrc.exe");
             if (File.Exists(inDir))
                 return inDir;
         }
 
-        var bundled = Path.Combine(AppContext.BaseDirectory, "tools", "bspsrc", "bspsrc.jar");
+        var bundled = Path.Combine(AppContext.BaseDirectory, "tools", "bspsrc", "bspsrc.exe");
         return File.Exists(bundled) ? bundled : null;
     }
 }

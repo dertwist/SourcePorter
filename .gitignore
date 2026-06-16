@@ -79,6 +79,15 @@ x86/
 sourceporter.local.json
 *.log
 
+# Scratch / working directory.
+/tmp/
+
+# BSPSource packaging input (the upstream bspsrc-windows.zip release image).
+# The committed deliverable is tools/bspsrc/bspsrc.exe; this is only the build
+# input for tools/bspsrc-launcher and must not be committed (it is ~46 MB).
+/tools/bspsrc-launcher/bspsrc-runtime.zip
+/tools/bspsrc-launcher/out/
+
 # Never commit ported game content or built archives
 /samples/**/content/
 /samples/**/game/
@@ -87,3 +96,4 @@ sourceporter.local.json
 
 # Local read-only reference clones (e.g. ValveResourceFormat source)
 /reference/
+src/SourcePorter.App/app.af~lock~

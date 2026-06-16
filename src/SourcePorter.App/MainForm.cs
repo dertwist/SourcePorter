@@ -35,6 +35,7 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = "SourcePorter — Source 1 → Source 2 Map Porter";
+        Icon = LoadAppIcon();
         MinimumSize = new Size(820, 560);
         Size = new Size(1040, 700);
         StartPosition = FormStartPosition.CenterScreen;
@@ -48,6 +49,13 @@ public sealed class MainForm : Form
 
         AppendConsole($"SourcePorter v{Application.ProductVersion}", Themer.CurrentThemeColors.Accent);
         AppendConsole("Set the CS2 directory and a source .vmf, then press Import.", Themer.CurrentThemeColors.ContrastSoft);
+    }
+
+    /// <summary>Loads the embedded multi-resolution app icon (see app.svg / app.ico).</summary>
+    private static Icon? LoadAppIcon()
+    {
+        using var stream = typeof(MainForm).Assembly.GetManifestResourceStream("SourcePorter.App.app.ico");
+        return stream is null ? null : new Icon(stream);
     }
 
     private void BuildLayout()

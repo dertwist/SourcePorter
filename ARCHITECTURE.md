@@ -39,9 +39,10 @@ SourcePorter.sln
 ├─ src/
 │  ├─ SourcePorter.Core/        Class library — all porting logic, no UI.
 │  │  ├─ Domain/                PortProject, ImportOptions, Cs2Install.
-│  │  ├─ Toolchain/             1:1 port of import_map_community.py + utlc.py.
+│  │  ├─ Toolchain/             1:1 port of import_map_community.py + utlc.py,
+│  │  │                         plus the bundled-BSPSource .bsp→.vmf bridge.
 │  │  │                         (ProcessRunner, ValveToolLocator, RefsFile,
-│  │  │                          ImportPaths, MapImportService)
+│  │  │                          ImportPaths, MapImportService, BspDecompiler)
 │  │  └─ Validation/            Asset validator: missing-file / read-error checks.
 │  │                            (Source2Resource, VpkIndex, GameInfo, AssetValidator)
 │  └─ SourcePorter.App/         WinForms front-end.
@@ -50,10 +51,13 @@ SourcePorter.sln
 │     ├─ ReferenceForm.cs       Fields & tools reference window.
 │     ├─ ConfigsEditorForm.cs   Editor for the bundled source1import_*.txt configs.
 │     ├─ AppSettings.cs         Persisted GUI inputs (cfg-json equivalent).
+│     ├─ app.svg / app.ico      Source-2-flavored app icon (SVG source + built .ico).
 │     ├─ Icons/                 Embedded Source 2 Viewer SVG icons.
 │     └─ Theme/                 Source 2 Viewer theme (Themer.cs) + SVG helpers.
 ├─ tools/
-│  └─ import_scripts/           Valve's source1import configs + scripts (bundled).
+│  ├─ import_scripts/           Valve's source1import configs + scripts (bundled).
+│  ├─ bspsrc/                   Bundled BSPSource .bsp→.vmf decompiler (single bspsrc.exe).
+│  └─ bspsrc-launcher/          Build-only helper that packs BSPSource into that exe.
 └─ tests/
    └─ SourcePorter.Core.Tests/  xUnit tests for the Core library.
 ```
@@ -123,6 +127,14 @@ match the Python.
   bounded by `ImportOptions.MaxParallelism` (default 4; 1 = sequential). The 2-UV
   model-compile pass stays sequential — it mutates the shared 2-UV list and shared
   `.vmat` files. Exposed as CLI `--threads N` and a GUI Threads spinner.
+- [`BspDecompiler`](src/SourcePorter.Core/Toolchain/BspDecompiler.cs) — the
+  `.bsp` bridge. Valve ships no Source 1 decompiler, so when the input is a
+  `.bsp` the GUI/CLI first decompile it to a `.vmf` (via the bundled BSPSource)
+  and then feed that into the normal import path above. BSPSource is shipped as a
+  **single self-contained `bspsrc.exe`** under `tools/bspsrc/` (its own bundled
+  JRE — no system Java needed); `ResolveExe` finds it next to the app. BSPSource
+  exits 0 even on a per-file failure, so the missing-output check — not the exit
+  code — is the real gate. See §4b for how that exe is built.
 
 The import sequence we reproduce, in order:
 
@@ -163,6 +175,21 @@ these files in place.
 importer there. The `.py` files are kept for reference (we reimplemented them in
 C#) and are not used at runtime. Valve's `bin/` binaries are **not** copied —
 they're resolved from the user's CS2 install via `ValveToolLocator`.
+
+### 4b. Bundled BSPSource (`tools/bspsrc/`)
+
+[`BspDecompiler`](src/SourcePorter.Core/Toolchain/BspDecompiler.cs) shells out to
+**BSPSource** ([ata4/bspsrc](https://github.com/ata4/bspsrc), GPL-3.0), a Java
+`.bsp`→`.vmf` decompiler. We deliberately **do not reimplement** it — we bundle
+the upstream tool. Because BSPSource ships as a *jlink runtime image* (its own JRE
++ app modules, ~160 files), [`tools/bspsrc-launcher`](tools/bspsrc-launcher) folds
+that whole image into one self-contained `bspsrc.exe`: a tiny .NET stub embeds the
+image, extracts it to a per-user cache on first run, and forwards all args/stdio to
+the BSPSource CLI through the bundled JRE. The committed deliverable is the single
+`tools/bspsrc/bspsrc.exe`, copied next to the app/CLI as `CopyToOutputDirectory`
+content. The launcher project is **not** in `SourcePorter.sln` (build-only); the
+upstream `bspsrc-windows.zip` build input is git-ignored. To refresh BSPSource, see
+[`tools/bspsrc-launcher/README.md`](tools/bspsrc-launcher/README.md).
 
 ---
 
@@ -318,6 +345,12 @@ rendered exactly as upstream does:
 - Icons are used on the **Import** button (`Decompile`), the **Tools** menu
   items (`Find`, `Settings`), and the console header (`Log`, `ClearLog`).
 - The VRF brand logo is intentionally **not** used as SourcePorter's identity.
+  SourcePorter's app icon — [`app.svg`](src/SourcePorter.App/app.svg), rasterised
+  to a multi-resolution `app.ico` and wired as the project's `ApplicationIcon` and
+  the window/taskbar icon — places the **Source 2 "S²" mark** on a dark Source 2
+  Viewer tile (dark `App`/`AppMiddle` gradient, `Border` stroke). The glyphs are
+  lightened from the brand gray so they read on the dark tile, and the signature
+  orange swoosh is kept.
 
 ---
 
@@ -366,7 +399,8 @@ the process is killed (when `FormClosing` never fires). Serialised with
 ## 13. Out of scope / non-goals
 
 - Editing geometry, lighting, or cubemap placement — that is Hammer's job.
-- Decompiling Source 1 `.bsp` (use BSPSource) or `.mdl` (use Crowbar). These are
-  upstream of SourcePorter and only referenced as guided steps.
+- **Reimplementing** a `.bsp` or `.mdl` decompiler. We don't rewrite BSPSource —
+  we **bundle** the upstream tool and drive it for `.bsp` input (see §4b).
+  `.mdl` decompiling (Crowbar) stays a guided, upstream step.
 - Cross-platform support — gated entirely by Valve's Windows-only tools.
 - Particle authoring — the guide's particle work is Particle-Editor territory.

@@ -6,6 +6,8 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>SourcePorter.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Source-2-flavored app icon (rasterised from app.svg; see app.svg header). -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <!-- Per-monitor v2 DPI + dark title bars look correct on modern Windows. -->
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <!--
@@ -27,6 +29,8 @@
   <ItemGroup>
     <!-- Source 2 Viewer (ValveResourceFormat, MIT) icons, embedded for runtime SVG rendering. -->
     <EmbeddedResource Include="Icons\*.svg" />
+    <!-- App icon embedded too, so the window/taskbar can show it at every size. -->
+    <EmbeddedResource Include="app.ico" LogicalName="SourcePorter.App.app.ico" />
   </ItemGroup>
 
   <ItemGroup>
@@ -38,6 +42,13 @@
     -->
     <Content Include="..\..\tools\import_scripts\*.txt"
              Link="import_scripts\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Bundled BSPSource (.bsp decompiler); resolved at runtime by BspDecompiler. -->
+    <Content Include="..\..\tools\bspsrc\bspsrc.exe"
+             Link="tools\bspsrc\bspsrc.exe"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

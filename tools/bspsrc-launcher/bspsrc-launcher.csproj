@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Build-only helper. NOT part of SourcePorter.sln: it exists solely to fold the
+    BSPSource Windows runtime image (bspsrc-runtime.zip, git-ignored) into one
+    self-contained exe. The published artifact is committed at ..\bspsrc\bspsrc.exe.
+    See README.md for the one-line build/refresh command.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>bspsrc</AssemblyName>
+    <RootNamespace>SourcePorter.BspSrcLauncher</RootNamespace>
+    <!-- Mirrors the embedded BSPSource version; also the cache key (see Program.cs). -->
+    <Version>1.4.8</Version>
+
+    <!-- One file, no system Java, no shared .NET runtime required. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <!-- The stub only touches ZipArchive/Process/Assembly, so trimming the runtime
+         is safe and roughly halves the .NET portion of the exe. -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>none</DebugType>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The BSPSource Windows release zip (jlink runtime image + app modules). -->
+    <EmbeddedResource Include="bspsrc-runtime.zip" LogicalName="bspsrc.runtime.zip" />
+  </ItemGroup>
+
+</Project>
