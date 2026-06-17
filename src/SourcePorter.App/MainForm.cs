@@ -104,6 +104,8 @@ public sealed class MainForm : Form
         var tools = new ToolStripMenuItem("&Tools");
         tools.DropDownItems.Add("&Import missing assets…", Themer.GetIcon("Recover", 16), async (_, _) => await RunImportMissingAsync());
         tools.DropDownItems.Add("&Configs Editor…", Themer.GetIcon("Settings", 16), (_, _) => new ConfigsEditorForm().Show(this));
+        tools.DropDownItems.Add("Clean &BSP content cache", Themer.GetIcon("ClearLog", 16), (_, _) => CleanBspCache());
+        tools.DropDownItems.Add("Clean &refs files", Themer.GetIcon("ClearLog", 16), (_, _) => CleanRefsFiles());
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add("&Reference…", Themer.GetIcon("Find", 16), (_, _) => new ReferenceForm().Show(this));
         var file = new ToolStripMenuItem("&File");
@@ -350,19 +352,24 @@ public sealed class MainForm : Form
 
     private void BrowseSourceMap()
     {
-        var bsp = string.Equals(_inputMode.SelectedItem as string, "BSP", StringComparison.OrdinalIgnoreCase);
         using var dlg = new OpenFileDialog
         {
-            Filter = bsp
-                ? "Source 1 BSP (*.bsp)|*.bsp|All files (*.*)|*.*"
-                : "Source 1 map (*.vmf)|*.vmf|All files (*.*)|*.*",
-            Title = bsp ? "Select the source .bsp" : "Select the source .vmf",
+            // Both source types are selectable; whichever the user picks drives the input
+            // method below. The combined .vmf/.bsp filter is the default view.
+            Filter = "Source 1 map (*.vmf;*.bsp)|*.vmf;*.bsp|Source 1 map (*.vmf)|*.vmf|Source 1 BSP (*.bsp)|*.bsp|All files (*.*)|*.*",
+            FilterIndex = 1,
+            Title = "Select the source .vmf or .bsp",
         };
         if (File.Exists(_sourceMap.Text))
             dlg.FileName = _sourceMap.Text;
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _sourceMap.Text = dlg.FileName;
+            // Auto-switch the input method to match the file the user actually chose.
+            if (string.Equals(Path.GetExtension(dlg.FileName), ".bsp", StringComparison.OrdinalIgnoreCase))
+                _inputMode.SelectedItem = "BSP";
+            else if (string.Equals(Path.GetExtension(dlg.FileName), ".vmf", StringComparison.OrdinalIgnoreCase))
+                _inputMode.SelectedItem = "VMF";
             if (_outputAddon.Text.Length == 0)
                 _outputAddon.Text = Path.GetFileNameWithoutExtension(dlg.FileName);
             SaveSettings();
@@ -445,22 +452,8 @@ public sealed class MainForm : Form
             // Stage the source into a temp content root that satisfies source1import's
             // "<contentdir>\maps\<name>.vmf" layout. For a .bsp this decompiles it first
             // (and, when enabled, unpacks its embedded materials/models alongside).
-            string vmf;
-            if (bspMode)
-            {
-                var decompiler = new BspDecompiler(runner);
-                decompiler.OnLog += LogFromWorker;
-                try
-                {
-                    vmf = await Task.Run(() =>
-                        MapStaging.StageBspAsync(decompiler, source, _unpackEmbedded.Checked, _cts.Token));
-                }
-                finally { decompiler.OnLog -= LogFromWorker; }
-            }
-            else
-            {
-                vmf = await Task.Run(() => MapStaging.StageVmf(source, LogFromWorker));
-            }
+            var vmf = await StageCurrentSourceAsync(runner, bspMode, _cts.Token)
+                      ?? throw new FileNotFoundException("Source map file not found.");
             AppendConsole($"Source staged → {vmf}", muted);
 
             // A BSPSource-decompiled map is flat — every func_instance is inlined into the
@@ -496,8 +489,23 @@ public sealed class MainForm : Form
             AppendConsole($"Done. Imported {project.MapName} into addon '{addon}'.", Themer.CurrentThemeColors.Accent);
             SetStatus("Import complete.");
 
+            // Brush UV scale fix for a decompiled BSP's custom materials (source1import bakes them
+            // at a 16x16-default scale because it can't read their .vtf). Runs automatically for BSP
+            // imports — the staged content holds only the BSP's custom materials, so stock faces are
+            // never touched. Before the opt-in vmap edits so a collapse merges the corrected geometry.
+            if (bspMode)
+            {
+                SetStatus("Fixing brush UV scale…");
+                await Task.Run(() => PostImportVmapTools.FixBrushUvScale(
+                    cs2, addon, project.S1ContentDir, LogFromWorker, _cts.Token), _cts.Token);
+            }
+
             // Opt-in post-import .vmap edits, before stats/validation so those reflect the final map.
             await RunPostImportVmapToolsAsync(cs2, addon, project.MapName, _cts.Token);
+
+            // Fix materials source1import left as error.vfx (e.g. water) by re-converting their
+            // embedded legacy_import VMT to the correct shader (csgo_water, …). Before validation.
+            await RemapErrorMaterialsAsync(cs2, addon, _cts.Token);
 
             ReportAddonStats(cs2, addon);
 
@@ -559,6 +567,88 @@ public sealed class MainForm : Form
     }
 
     /// <summary>
+    /// Tools → Clean BSP content cache. Deletes the per-map staging dirs under
+    /// <c>%TEMP%\SourcePorter</c> (decompiled <c>.vmf</c>s + unpacked embedded BSP
+    /// content). They are throwaway scratch space — each import re-creates its own — so
+    /// clearing them only reclaims disk. Reports the bytes freed to the console.
+    /// </summary>
+    private void CleanBspCache()
+    {
+        var muted = Themer.CurrentThemeColors.ContrastSoft;
+        var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
+        if (_cts is not null)
+        {
+            AppendConsole("An import is running — cancel it before cleaning the cache.", muted);
+            return;
+        }
+        try
+        {
+            var freed = MapStaging.CleanCache();
+            AppendConsole(freed == 0
+                ? "BSP content cache is already empty."
+                : $"Cleaned BSP content cache — freed {FormatBytes(freed)}.", muted);
+            SetStatus("BSP content cache cleaned.");
+        }
+        catch (Exception ex)
+        {
+            AppendConsole($"Failed to clean BSP content cache: {ex.Message}", red);
+        }
+    }
+
+    /// <summary>
+    /// Tools → Clean refs files. Deletes the importer's intermediate
+    /// <c>importfilelist</c> scratch files (<c>*_refs.txt</c>, <c>*_mdl_lst.txt</c>,
+    /// <c>*_new_refs.txt</c>, the <c>repair_*.txt</c> lists, the per-model
+    /// <c>*_refs\</c> mesh dirs) from the current output addon's content tree.
+    /// They are regenerated on every import, so removing them only declutters the
+    /// addon and never touches the ported <c>.vmap</c>/<c>.vmdl</c>/<c>.vmat</c> assets.
+    /// </summary>
+    private void CleanRefsFiles()
+    {
+        var muted = Themer.CurrentThemeColors.ContrastSoft;
+        var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
+        if (_cts is not null)
+        {
+            AppendConsole("An import is running — cancel it before cleaning refs files.", muted);
+            return;
+        }
+
+        var cs2 = new Cs2Install(_cs2Dir.Text.Trim());
+        var addon = _outputAddon.Text.Trim();
+        if (addon.Length == 0) { AppendConsole("Enter an output addon name.", red); return; }
+
+        var contentRoot = cs2.ContentAddonDir(addon);
+        if (!Directory.Exists(contentRoot))
+        {
+            AppendConsole($"Addon content not found: {contentRoot}.", red);
+            return;
+        }
+
+        try
+        {
+            var result = RefsCleanup.Clean(contentRoot);
+            var removed = result.FileCount + result.DirCount;
+            AppendConsole(removed == 0
+                ? "No refs files to clean."
+                : $"Cleaned {result.FileCount} refs file(s) and {result.DirCount} refs dir(s) — freed {FormatBytes(result.BytesFreed)}.", muted);
+            SetStatus(removed == 0 ? "No refs files to clean." : "Refs files cleaned.");
+        }
+        catch (Exception ex)
+        {
+            AppendConsole($"Failed to clean refs files: {ex.Message}", red);
+        }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        double size = bytes;
+        var unit = 0;
+        while (size >= 1024 && unit < units.Length - 1) { size /= 1024; unit++; }
+        return $"{size:0.#} {units[unit]}";
+    }
+
+    /// <summary>
     /// Tools → Import missing assets. Validates the already-imported addon and re-imports
     /// the materials/models the main import missed (a model's gib/breakpiece children, a
     /// skybox material from a lighting prefab, …), looping import→re-validate to a fixpoint
@@ -596,39 +686,58 @@ public sealed class MainForm : Form
         var service = new MapImportService(cs2.Tools, runner, ResolveImportScriptsDir(cs2));
         service.OnLog += LogFromWorker;
 
-        // Repair only needs the install-derived paths + addon (the missing assets are
-        // re-imported by exact path); the source map isn't required, so build a minimal
-        // project directly rather than via Cs2Install.BuildProject (which parses a .vmf).
-        var project = new PortProject
+        var options = new ImportOptions
         {
-            S1GameInfoDir = cs2.S1GameInfoDir,
-            S2GameInfoDir = cs2.S2GameInfoDir,
-            AddonName = addon,
-            MapName = addon,
-            Import = new ImportOptions
-            {
-                CompileAssets = _compileAssets.Checked,
-                CompactLog = _compactLog.Checked,
-                // MaxParallelism defaults to all logical processors minus one.
-            },
+            CompileAssets = _compileAssets.Checked,
+            CompactLog = _compactLog.Checked,
+            // MaxParallelism defaults to all logical processors minus one.
         };
 
         SetRunning(true);
         _cts = new CancellationTokenSource();
         try
         {
+            // Re-stage the current source map (if one is set) so the repair gets the same content
+            // root as the import — crucially, a decompiled .bsp's unpacked custom materials/models.
+            // With it, S1ContentDir points at that staged root and the repair can re-import custom
+            // assets (PrepareDepsGameDir exposes them as a game path); without it the repair falls
+            // back to install-derived paths and can only reach stock CS:GO sources.
+            var bspMode = string.Equals(_inputMode.SelectedItem as string, "BSP", StringComparison.OrdinalIgnoreCase);
+            var vmf = await StageCurrentSourceAsync(runner, bspMode, _cts.Token);
+            var project = vmf is not null
+                ? cs2.BuildProject(vmf, addon, options)
+                : new PortProject
+                {
+                    // No source map: repair by exact path against the install-derived paths only.
+                    S1GameInfoDir = cs2.S1GameInfoDir,
+                    S2GameInfoDir = cs2.S2GameInfoDir,
+                    AddonName = addon,
+                    MapName = addon,
+                    Import = options,
+                };
+            if (vmf is not null)
+                AppendConsole($"Source staged for repair → {vmf}", muted);
+
             var report = await ValidateAddonAsync(cs2, addon, _cts.Token);
             if (report is null)
                 return; // validation error already reported
 
             if (report.MissingImportCount == 0)
             {
-                AppendConsole("No un-imported materials/models found — nothing to import.", Themer.CurrentThemeColors.Accent);
+                AppendConsole("No un-imported materials/models found.", Themer.CurrentThemeColors.Accent);
+                // Still fix any error.vfx materials (they exist on disk, so aren't "missing").
+                await RemapErrorMaterialsAsync(cs2, addon, _cts.Token);
                 SetStatus("Nothing to import.");
                 return;
             }
 
-            await RepairMissingAssetsAsync(cs2, service, project, report, _cts.Token);
+            // When porting a .bsp, hand the repair the original .bsp (so it can read embedded files
+            // BSPSource didn't unpack) and the .bsp's own folder (loose custom content beside it).
+            var source = _sourceMap.Text.Trim();
+            var bspPath = bspMode && File.Exists(source) ? source : null;
+            var extraRoots = bspPath is not null ? new[] { Path.GetDirectoryName(bspPath)! } : null;
+
+            await RepairMissingAssetsAsync(cs2, service, project, report, _cts.Token, bspPath, extraRoots);
         }
         catch (OperationCanceledException)
         {
@@ -671,6 +780,35 @@ public sealed class MainForm : Form
         Directory.Exists(cs2.ImportScriptsDir) ? cs2.ImportScriptsDir : AppPaths.ImportScriptsDir;
 
     /// <summary>
+    /// Stages the GUI's current source map into a temp content root (decompiling + unpacking a
+    /// <c>.bsp</c> when <paramref name="bspMode"/> is set) and returns the staged <c>.vmf</c>
+    /// path, or <c>null</c> when no usable source map is set. Shared by the import and the
+    /// missing-asset repair so the repair gets the same staged content root — the one that holds
+    /// a decompiled BSP's unpacked custom materials/models — and can re-import custom assets, not
+    /// just stock CS:GO ones.
+    /// </summary>
+    private async Task<string?> StageCurrentSourceAsync(ProcessRunner runner, bool bspMode, CancellationToken ct)
+    {
+        var source = _sourceMap.Text.Trim();
+        if (source.Length == 0 || !File.Exists(source))
+            return null;
+
+        if (bspMode)
+        {
+            var decompiler = new BspDecompiler(runner);
+            decompiler.OnLog += LogFromWorker;
+            try
+            {
+                return await Task.Run(() =>
+                    MapStaging.StageBspAsync(decompiler, source, _unpackEmbedded.Checked, ct));
+            }
+            finally { decompiler.OnLog -= LogFromWorker; }
+        }
+
+        return await Task.Run(() => MapStaging.StageVmf(source, LogFromWorker));
+    }
+
+    /// <summary>
     /// Runs the asset validator over the addon and reports findings to the console.
     /// Called automatically at the end of a successful import — it does not own the
     /// running-state or cancellation token; the caller (RunImportAsync) does, so the
@@ -704,10 +842,15 @@ public sealed class MainForm : Form
             if (report.HasIssues)
             {
                 if (report.MissingImportCount > 0)
+                    // Most MissingImports are transitive deps the main import never enumerates — a
+                    // model's gib/breakpiece children (referenced inside the parent .vmdl) or a
+                    // material used only by a prefab sub-map — which Tools → Import missing assets
+                    // re-imports. Only assets with no Source 1 source in this CS:GO install stay missing.
                     AppendConsole(
                         $"The content references {report.MissingImportMaterials} material(s) and {report.MissingImportModels} model(s) " +
-                        "that are NOT imported and NOT in base CS2 — the map will load with them missing. " +
-                        "Re-import with Skip-dependencies OFF (and Compile Assets ON for a shippable addon).", red);
+                        "that are NOT imported and NOT in base CS2 — the map will load with them missing. Many are transitive " +
+                        "dependencies the importer skips (a model's gib/breakpiece children, a prefab-only material); run " +
+                        "Tools → Import missing assets to re-import them. Any that remain have no Source 1 source in this CS:GO install.", red);
 
                 AppendConsole(
                     $"Validation found {report.MissingPrefabCount} missing prefab vmap(s), " +
@@ -744,7 +887,8 @@ public sealed class MainForm : Form
     /// cancellation token, so Cancel aborts it too.
     /// </summary>
     private async Task RepairMissingAssetsAsync(
-        Cs2Install cs2, MapImportService service, PortProject project, ValidationReport report, CancellationToken ct)
+        Cs2Install cs2, MapImportService service, PortProject project, ValidationReport report, CancellationToken ct,
+        string? bspPath = null, IReadOnlyList<string>? extraContentRoots = null)
     {
         var muted = Themer.CurrentThemeColors.ContrastSoft;
         var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
@@ -758,7 +902,18 @@ public sealed class MainForm : Form
                 $"Re-importing {report.MissingImportCount} material/model(s) the importer missed…",
                 muted);
 
-            var result = await Task.Run(() => importer.RepairAsync(project, report, ct: ct));
+            var result = await Task.Run(() =>
+                importer.RepairAsync(project, report, ct: ct, bspPath: bspPath, extraContentRoots: extraContentRoots));
+
+            AppendConsole(
+                $"Sourced {result.SourcedFromCsgoVpk} from CS:GO VPKs and {result.SourcedFromCustomContent} from custom content" +
+                (result.MaterialsConvertedNonBinary > 0
+                    ? $"; converted {result.MaterialsConvertedNonBinary} tool material(s) non-binary"
+                    : "") +
+                (result.ErrorMaterialsRemapped > 0
+                    ? $"; remapped {result.ErrorMaterialsRemapped} error.vfx material(s)"
+                    : "") + ".",
+                muted);
 
             AppendConsole(
                 $"Repair imported {result.ModelsImported} model(s) and {result.MaterialsImported} material(s) " +
@@ -768,7 +923,7 @@ public sealed class MainForm : Form
             if (result.StillMissing > 0)
                 AppendConsole(
                     $"{result.StillMissing} material/model(s) still un-imported — no Source 1 source was found for them " +
-                    "(they may be genuinely absent from this CS:GO install).", red);
+                    "in the CS:GO VPKs or custom content (they may be genuinely absent from this install).", red);
             else
                 SetStatus("Missing assets imported.");
         }
@@ -780,6 +935,21 @@ public sealed class MainForm : Form
         {
             importer.OnLog -= LogFromWorker;
         }
+    }
+
+    /// <summary>
+    /// Re-maps any <c>error.vfx</c> material in the addon to its correct shader using the embedded
+    /// <c>legacy_import</c> VMT (see <see cref="SourcePorter.Core.Materials.ErrorVmatRemapper"/>).
+    /// </summary>
+    private async Task RemapErrorMaterialsAsync(Cs2Install cs2, string addon, CancellationToken ct)
+    {
+        SetStatus("Fixing error.vfx materials…");
+        var remap = await Task.Run(
+            () => SourcePorter.Core.Materials.ErrorVmatRemapper.FixAddon(cs2.ContentAddonDir(addon), LogFromWorker), ct);
+        if (remap.Remapped > 0)
+            AppendConsole(
+                $"Remapped {remap.Remapped} material(s) source1import couldn't map (error.vfx) to the correct shader.",
+                Themer.CurrentThemeColors.Accent);
     }
 
     /// <summary>Tallies and prints the imported addon's size + asset counts (see <see cref="AddonStats"/>).</summary>

@@ -58,6 +58,16 @@ public class MapImportArgsTests
     }
 
     [Fact]
+    public void ConfirmIfNotCsgo_answers_the_prompt_only_for_a_non_csgo_gameinfo_dir()
+    {
+        // source1import only prompts when the gameinfo dir isn't named csgo (our custom-content
+        // gameinfo lives in a <map>-named staged dir) — answer 'y' there, nothing for csgo.
+        Assert.Null(MapImportService.ConfirmIfNotCsgo(@"E:\Steam\csgo"));
+        Assert.Null(MapImportService.ConfirmIfNotCsgo(@"E:\Steam\csgo\"));
+        Assert.Equal("y\n", MapImportService.ConfirmIfNotCsgo(@"C:\Temp\SourcePorter\de_gracia\de_gracia"));
+    }
+
+    [Fact]
     public void AccessViolationExitCode_is_the_windows_status_code()
     {
         // STATUS_ACCESS_VIOLATION 0xC0000005 as a signed int (what Process.ExitCode reports).

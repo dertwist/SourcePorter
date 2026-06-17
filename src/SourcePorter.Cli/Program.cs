@@ -5,7 +5,7 @@ using SourcePorter.Core.Vmap;
 
 // Headless harness for porting + validating maps — used to test imports in bulk.
 //
-//   port     <cs2dir> <sourceMap.vmf|.bsp> <addon> [--no-bsp] [--no-unpack] [--compile] [--no-compile-assets] [--collapse-prefabs] [--skybox-template] [--repair] [--verbose]
+//   port     <cs2dir> <sourceMap.vmf|.bsp> <addon> [--no-bsp] [--no-unpack] [--compile] [--no-compile-assets] [--collapse-prefabs] [--skybox-template] [--no-uv-fix] [--repair] [--verbose]
 //   validate <cs2dir> <addon>
 //   batch    <cs2dir> <mapsDir> [--limit N] [--no-bsp] [--no-unpack] [--compile] [--no-compile-assets] [--collapse-prefabs] [--skybox-template] [--repair] [--verbose]
 //
@@ -37,9 +37,9 @@ try
 {
     return args[0].ToLowerInvariant() switch
     {
-        "port" => await Port(args[1], args[2], args[3], NoBsp(args), args.Contains("--compile"), CompileAssets(args), !NoUnpack(args), Threads(args), Compact(args), Repair(args), Collapse(args), Skybox(args)),
+        "port" => await Port(args[1], args[2], args[3], NoBsp(args), args.Contains("--compile"), CompileAssets(args), !NoUnpack(args), Threads(args), Compact(args), Repair(args), Collapse(args), Skybox(args), NoUvFix(args)),
         "validate" => Validate(args[1], args[2]),
-        "batch" => await Batch(args[1], args[2], Limit(args), NoBsp(args), args.Contains("--compile"), CompileAssets(args), !NoUnpack(args), Threads(args), Compact(args), Repair(args), Collapse(args), Skybox(args)),
+        "batch" => await Batch(args[1], args[2], Limit(args), NoBsp(args), args.Contains("--compile"), CompileAssets(args), !NoUnpack(args), Threads(args), Compact(args), Repair(args), Collapse(args), Skybox(args), NoUvFix(args)),
         _ => Fail($"unknown command '{args[0]}'"),
     };
 }
@@ -56,6 +56,7 @@ static bool Compact(string[] a) => !a.Contains("--verbose");
 static bool Repair(string[] a) => a.Contains("--repair");
 static bool Collapse(string[] a) => a.Contains("--collapse-prefabs");
 static bool Skybox(string[] a) => a.Contains("--skybox-template");
+static bool NoUvFix(string[] a) => a.Contains("--no-uv-fix");
 static int Limit(string[] a)
 {
     var i = Array.IndexOf(a, "--limit");
@@ -68,7 +69,7 @@ static int Threads(string[] a)
 }
 static int Fail(string m) { Console.Error.WriteLine(m); return 2; }
 
-static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool noBsp, bool compile, bool compileAssets, bool unpack, int threads, bool compact, bool repair, bool collapse, bool skybox)
+static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool noBsp, bool compile, bool compileAssets, bool unpack, int threads, bool compact, bool repair, bool collapse, bool skybox, bool noUvFix)
 {
     var cs2 = new Cs2Install(cs2Dir);
     if (!cs2.IsValid(out var err)) { Console.Error.WriteLine(err); return 1; }
@@ -83,12 +84,14 @@ static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool 
     // and plain -usebsp can crash source1import's merge pass — use -usebsp_nomergeinstances for
     // decompiled input. A loose .vmf keeps the default -usebsp (it may have real instances).
     var noMerge = false;
+    var bspImported = false;
     if (sourceMap.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase) && !noBsp)
     {
         var decompiler = new BspDecompiler(runner);
         decompiler.OnLog += Console.WriteLine;
         vmf = await MapStaging.StageBspAsync(decompiler, sourceMap, unpack);
         noMerge = true;
+        bspImported = true;
     }
     else
     {
@@ -101,6 +104,12 @@ static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool 
 
     Console.WriteLine($"=== IMPORT {project.MapName} -> {addon} ===");
     await service.ImportAsync(project);
+
+    // Brush UV scale fix for a decompiled BSP's custom materials (source1import bakes them at a
+    // 16x16-default scale because it can't read their .vtf). On by default for BSP imports; the
+    // staged content holds only the BSP's custom materials, so stock faces are never touched.
+    if (bspImported && !noUvFix)
+        PostImportVmapTools.FixBrushUvScale(cs2, addon, project.S1ContentDir, Console.WriteLine);
 
     // Opt-in post-import .vmap edits, before the compile so a --compile picks them up.
     if (collapse)
@@ -156,7 +165,7 @@ static void PrintReport(string addon, ValidationReport report)
                       $"missingCompiledDeps={report.MissingReferenceCount} readErrors={report.ErrorCount} ===");
 }
 
-static async Task<int> Batch(string cs2Dir, string mapsDir, int limit, bool noBsp, bool compile, bool compileAssets, bool unpack, int threads, bool compact, bool repair, bool collapse, bool skybox)
+static async Task<int> Batch(string cs2Dir, string mapsDir, int limit, bool noBsp, bool compile, bool compileAssets, bool unpack, int threads, bool compact, bool repair, bool collapse, bool skybox, bool noUvFix)
 {
     var maps = Directory.EnumerateFiles(mapsDir, "*.vmf").Take(limit).ToList();
     Console.WriteLine($"Batch porting {maps.Count} map(s) from {mapsDir} (compile={compile}, compileAssets={compileAssets}, threads={threads})");
@@ -168,7 +177,7 @@ static async Task<int> Batch(string cs2Dir, string mapsDir, int limit, bool noBs
         var addon = $"{name}_test";
         try
         {
-            var code = await Port(cs2Dir, map, addon, noBsp, compile, compileAssets, unpack, threads, compact, repair, collapse, skybox);
+            var code = await Port(cs2Dir, map, addon, noBsp, compile, compileAssets, unpack, threads, compact, repair, collapse, skybox, noUvFix);
             results.Add($"{name}: {(code == 0 ? "CLEAN" : "ISSUES")}");
         }
         catch (Exception ex)

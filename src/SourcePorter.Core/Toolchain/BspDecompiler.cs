@@ -31,11 +31,11 @@ public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation =
 
         Directory.CreateDirectory(Path.GetDirectoryName(outputVmfPath)!);
 
-        // `bspsrc [OPTIONS] <bsp>...` with `-o <file>` as the .vmf destination.
-        // `--unpack_embedded` additionally extracts the BSP's packed files; BSPSource's
-        // 'smart' unpack (on by default) skips the vbsp-generated, engine-only junk.
-        var unpack = unpackEmbedded ? "--unpack_embedded " : "";
-        var args = $"{unpack}-o \"{outputVmfPath}\" \"{bspPath}\"";
+        // `bspsrc [OPTIONS] <bsp>...` with `-o <file>` as the .vmf destination. We do NOT use
+        // BSPSource's `--unpack_embedded`: its "smart" unpack drops vbsp-generated materials
+        // (e.g. the `maps/<map>/…_wvt_patch.vmt` worldvertextransition patches the map references).
+        // Instead we extract the BSP's pakfile in full ourselves (BspPakfile.ExtractAll, below).
+        var args = $"-o \"{outputVmfPath}\" \"{bspPath}\"";
         OnLog?.Invoke($"Decompiling {Path.GetFileName(bspPath)} with BSPSource" +
                       (unpackEmbedded ? " (unpacking embedded content)…" : "…"));
 
@@ -58,18 +58,27 @@ public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation =
             throw new InvalidOperationException(
                 $"BSPSource did not produce {outputVmfPath} — see the log above for the cause.");
 
-        // BSPSource unpacks embedded files into a sibling dir named after the output
-        // .vmf (e.g. `<out-dir>\<map>\materials\…`), which is itself a content root.
+        // Extract the BSP's embedded pakfile in FULL into a sibling dir named after the output
+        // .vmf (e.g. `<out-dir>\<map>\materials\…`), which becomes the content root. Full (not
+        // BSPSource's filtered) extraction is what surfaces the vbsp-generated _wvt_patch
+        // materials and every other packed resource the import needs.
         string? unpackDir = null;
         if (unpackEmbedded)
         {
             var candidate = Path.Combine(
                 Path.GetDirectoryName(outputVmfPath)!,
                 Path.GetFileNameWithoutExtension(outputVmfPath));
-            if (Directory.Exists(candidate))
+            using var pak = BspPakfile.Open(bspPath);
+            if (pak.EntryCount > 0)
+            {
+                var n = pak.ExtractAll(candidate, m => OnLog?.Invoke(m));
+                OnLog?.Invoke($"Unpacked {n} of {pak.EntryCount} embedded file(s) from the BSP pakfile (full, unfiltered).");
                 unpackDir = candidate;
+            }
             else
+            {
                 OnLog?.Invoke("No embedded files unpacked (map packs no custom content).");
+            }
         }
 
         VmfNormalizer.EnsureImportableHeader(outputVmfPath, m => OnLog?.Invoke(m));

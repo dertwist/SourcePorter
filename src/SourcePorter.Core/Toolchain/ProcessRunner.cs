@@ -30,7 +30,8 @@ public sealed class ProcessRunner
         string? workingDirectory,
         IReadOnlyDictionary<string, string>? environment,
         StringBuilder? captured,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? standardInput = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -40,6 +41,10 @@ public sealed class ProcessRunner
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // Some tools prompt for confirmation on stdin (e.g. source1import asks "Are you
+            // sure?" when the gameinfo dir isn't named csgo). When standardInput is supplied we
+            // feed it that answer; otherwise the child inherits no console and would hang.
+            RedirectStandardInput = standardInput is not null,
             CreateNoWindow = true,
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
@@ -67,6 +72,20 @@ public sealed class ProcessRunner
 
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
+
+        if (standardInput is not null)
+        {
+            // Answer any confirmation prompt, then close stdin so the tool sees EOF.
+            try
+            {
+                await process.StandardInput.WriteAsync(standardInput).ConfigureAwait(false);
+                process.StandardInput.Close();
+            }
+            catch
+            {
+                // Process may have already exited / closed its input — nothing to do.
+            }
+        }
 
         await using (ct.Register(() => TryKill(process)))
         {

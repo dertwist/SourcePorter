@@ -123,6 +123,10 @@ public sealed partial class MapImportService
         // access-violate on some maps (after the .vmap is written but before the refs list).
         // RunMapImportAsync degrades the BSP mode step by step (merge → no-merge → vmf-only) on
         // that crash and returns the mode that imported, so the step-5 re-import reuses it.
+        // The map import always uses the real csgo gameinfo dir (s1Game). For a decompiled BSP's
+        // custom materials source1import can't read texture dimensions and bakes brush UVs at a
+        // fixed 16x16-default scale — that's corrected deterministically afterwards by the
+        // post-import VmapBrushUvFixer (see ARCHITECTURE §5), not by tricking the importer.
         var bspMode = await RunMapImportAsync(
             s1Game, s1Content, addon, originalMapName, InitialBspMode(project.Import), env, ct);
         var importArgs = BuildMapImportArgs(s1Game, s1Content, addon, originalMapName, bspMode);
@@ -158,11 +162,15 @@ public sealed partial class MapImportService
                 var mdlList = refsFile.Replace("_refs.txt", "_mdl_lst.txt");
                 var newRefs = refsFile.Replace("_refs.txt", "_new_refs.txt");
 
+                // Make the staged content root a game search path so custom (BSP-unpacked)
+                // materials/models import, not just stock CS:GO assets (see ImportGameInfo).
+                var depsGameDir = PrepareDepsGameDir(s1Game, s1Content);
+
                 // now import mdls (as modeldoc), and their materials
-                await ImportAndCompileMapMdlsAsync(mdlList, paths, s1Game, addon, env, ct);
+                await ImportAndCompileMapMdlsAsync(mdlList, paths, s1Game, s1Content, depsGameDir, addon, env, ct);
 
                 // import refs (excluding mdls)
-                await ImportAndCompileMapRefsAsync(newRefs, paths, s1Game, addon, env, ct);
+                await ImportAndCompileMapRefsAsync(newRefs, paths, s1Content, depsGameDir, addon, env, ct);
 
                 // quick import vmf again, now that dependencies (materials especially) are compiled
                 await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct);
@@ -206,6 +214,37 @@ public sealed partial class MapImportService
     }
 
     /// <summary>
+    /// Returns the dir to use as <c>-src1gameinfodir</c> for the dependency imports. For a staged
+    /// content root (decompiled BSP / temp copy), drops a custom <see cref="ImportGameInfo"/> there
+    /// and returns that root — so its unpacked custom <c>.vmt</c>/<c>.vtf</c> are a source1import
+    /// GAME search path (materials import from the game path, not content) while the base CS:GO
+    /// assets still mount. Otherwise returns <paramref name="s1Game"/> unchanged (never writes into
+    /// the user's own folder). See <see cref="ImportGameInfo"/> for why the game path is required.
+    /// </summary>
+    private string PrepareDepsGameDir(string s1Game, string s1Content)
+    {
+        if (!ImportGameInfo.IsStagedContentDir(s1Content))
+            return s1Game;
+
+        ImportGameInfo.EnsureCustomGameInfo(s1Content, s1Game);
+        Emit("Custom BSP content detected — exposing the unpacked materials/models to source1import as " +
+             "a game search path so the map's embedded assets import (not just stock CS:GO ones).");
+        return s1Content;
+    }
+
+    /// <summary>
+    /// source1import prompts "…gameinfo.txt in csgo … Are you sure you want to continue? ('y')"
+    /// whenever its <c>-src1gameinfodir</c> leaf isn't <c>csgo</c> — which is the case for our
+    /// custom-content gameinfo (it lives in the <c>&lt;map&gt;</c>-named staged content root).
+    /// Returns the stdin answer (<c>"y"</c>) for that case so the run doesn't hang, else null.
+    /// </summary>
+    internal static string? ConfirmIfNotCsgo(string gameInfoDir) =>
+        string.Equals(Path.GetFileName(gameInfoDir.TrimEnd(Path.DirectorySeparatorChar, '/')), "csgo",
+            StringComparison.OrdinalIgnoreCase)
+            ? null
+            : "y\n";
+
+    /// <summary>
     /// Imports an explicit set of Source 1 models (<c>.mdl</c>) and materials (<c>.vmt</c>)
     /// into the addon — the "repair" primitive <see cref="MissingAssetImporter"/> drives
     /// when the validator finds dependencies the main import missed (a model's gib/breakpiece
@@ -221,7 +260,8 @@ public sealed partial class MapImportService
         PortProject project,
         IReadOnlyCollection<string> modelMdls,
         IReadOnlyCollection<string> materialVmts,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool stockOnly = false)
     {
         if (modelMdls.Count == 0 && materialVmts.Count == 0)
             return;
@@ -241,6 +281,15 @@ public sealed partial class MapImportService
             var mapsDir = Path.Combine(paths.S2ContentCsgoImported, "maps");
             Directory.CreateDirectory(mapsDir);
 
+            var s1Game = project.S1GameInfoDir;
+
+            // Stock assets (found in the CS:GO VPKs) MUST import through the real csgo gameinfo dir —
+            // it's what mounts pak01_dir.vpk. Routing them through a staged custom-content gameinfo
+            // (as custom BSP assets need) makes source1import report "Found no files matching". So the
+            // repair calls this once per source group: stock -> real csgo dir, custom -> staged root.
+            var s1Content = stockOnly ? s1Game : project.S1ContentDir;
+            var depsGameDir = stockOnly ? s1Game : PrepareDepsGameDir(s1Game, s1Content);
+
             // Models: a flat mdl list reused by the dependency-phase model importer (which
             // also imports each model's materials and applies the 2-UV fix). The list name
             // keeps the "mdl_lst" token that pass rewrites to "mtl_lst" for the material list.
@@ -249,7 +298,7 @@ public sealed partial class MapImportService
                 var mdlListPath = Path.Combine(mapsDir, "repair_mdl_lst.txt");
                 RefsFile.EnsureFileWritable(mdlListPath);
                 File.WriteAllLines(mdlListPath, modelMdls.Select(m => m.Replace('/', '\\')));
-                await ImportAndCompileMapMdlsAsync(mdlListPath, paths, project.S1GameInfoDir, project.AddonName, env, ct);
+                await ImportAndCompileMapMdlsAsync(mdlListPath, paths, s1Game, s1Content, depsGameDir, project.AddonName, env, ct);
             }
 
             // Materials: wrapped in the importfilelist format and reused by the refs importer
@@ -259,7 +308,7 @@ public sealed partial class MapImportService
                 var refsPath = Path.Combine(mapsDir, "repair_new_refs.txt");
                 RefsFile.EnsureFileWritable(refsPath);
                 File.WriteAllText(refsPath, RefsFile.RefsStringFromList(materialVmts));
-                await ImportAndCompileMapRefsAsync(refsPath, paths, project.S1GameInfoDir, project.AddonName, env, ct);
+                await ImportAndCompileMapRefsAsync(refsPath, paths, s1Content, depsGameDir, project.AddonName, env, ct);
             }
         }
         finally
@@ -410,7 +459,7 @@ public sealed partial class MapImportService
 
     // ---- ImportAndCompileMapMDLs ----
     private async Task ImportAndCompileMapMdlsAsync(
-        string mdlListPath, ImportPaths paths, string s1Game, string addon,
+        string mdlListPath, ImportPaths paths, string s1Game, string s1Content, string depsGameDir, string addon,
         IReadOnlyDictionary<string, string> env, CancellationToken ct)
     {
         if (!File.Exists(mdlListPath))
@@ -447,7 +496,10 @@ public sealed partial class MapImportService
         var mdlMtls = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
         await Parallel.ForEachAsync(modelJobs, parallel, async (job, token) =>
         {
-            var importArgs = $"-nop4 {job.Options} -i \"{s1Game}\" -o \"{s2Content}\" \"{job.Mdl}\"".Replace("  ", " ");
+            // Custom (BSP-unpacked) models live under the content root; stock ones under the
+            // CS:GO game dir. cs_mdl_import takes a single -i, so pick the root that has the .mdl.
+            var modelRoot = File.Exists(Path.Combine(s1Content, job.Mdl)) ? s1Content : s1Game;
+            var importArgs = $"-nop4 {job.Options} -i \"{modelRoot}\" -o \"{s2Content}\" \"{job.Mdl}\"".Replace("  ", " ");
             await RunAsync(_tools.ModelImporter, "cs_mdl_import.exe", importArgs, env, token, critical: false);
 
             var refsName = Path.Combine(s2Content, job.Mdl.Replace(".mdl", "_refs.txt"));
@@ -464,8 +516,11 @@ public sealed partial class MapImportService
         RefsFile.EnsureFileWritable(mtlListPath);
         File.WriteAllText(mtlListPath, RefsFile.RefsStringFromList(mdlMtls.Keys));
 
-        var importRefsArgs = $"-retail -nop4 -nop4sync -src1gameinfodir \"{s1Game}\" -s2addon {addon} -game csgo -usefilelist \"{mtlListPath}\"";
-        await RunAsync(_tools.Source1Import, "source1import.exe", importRefsArgs, env, ct, critical: false);
+        // -src1gameinfodir = depsGameDir (the custom-gameinfo'd content root for staged maps, so
+        // custom model materials resolve from the game path) and -src1contentdir = the content root.
+        var importRefsArgs = $"-retail -nop4 -nop4sync -src1gameinfodir \"{depsGameDir}\" -src1contentdir \"{s1Content}\" -s2addon {addon} -game csgo -usefilelist \"{mtlListPath}\"";
+        await RunAsync(_tools.Source1Import, "source1import.exe", importRefsArgs, env, ct, critical: false,
+            standardInput: ConfirmIfNotCsgo(depsGameDir));
 
         // (3) Re-apply F_FORCE_UV2 from the global list (sequential — shared file).
         var global2Uv = new HashSet<string>(StringComparer.Ordinal);
@@ -515,14 +570,17 @@ public sealed partial class MapImportService
 
     // ---- ImportAndCompileMapRefs ----
     private async Task ImportAndCompileMapRefsAsync(
-        string refsFile, ImportPaths paths, string s1Game, string addon,
+        string refsFile, ImportPaths paths, string s1Content, string depsGameDir, string addon,
         IReadOnlyDictionary<string, string> env, CancellationToken ct)
     {
         if (!File.Exists(refsFile))
             return;
 
-        var importArgs = $"-retail -nop4 -nop4sync -src1gameinfodir \"{s1Game}\" -s2addon {addon} -game csgo -usefilelist \"{refsFile}\"";
-        await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct, critical: false);
+        // -src1gameinfodir = depsGameDir so custom (BSP-unpacked) materials resolve from the game
+        // path; -src1contentdir keeps the content root available too.
+        var importArgs = $"-retail -nop4 -nop4sync -src1gameinfodir \"{depsGameDir}\" -src1contentdir \"{s1Content}\" -s2addon {addon} -game csgo -usefilelist \"{refsFile}\"";
+        await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct, critical: false,
+            standardInput: ConfirmIfNotCsgo(depsGameDir));
 
         // The refs are now imported as sources; only the compile below is gated.
         if (!_compileAssets)
@@ -617,7 +675,8 @@ public sealed partial class MapImportService
     // (the map import itself) or just warn (a single asset compile/import) so the
     // port completes and the validator can report what's actually missing. ----
     private async Task RunAsync(string toolPath, string fallbackExe, string arguments,
-        IReadOnlyDictionary<string, string> env, CancellationToken ct, bool critical = true)
+        IReadOnlyDictionary<string, string> env, CancellationToken ct, bool critical = true,
+        string? standardInput = null)
     {
         var exe = File.Exists(toolPath) ? toolPath : fallbackExe;
         var display = $"{Path.GetFileName(exe)} {arguments}";
@@ -626,7 +685,7 @@ public sealed partial class MapImportService
         Emit("- Running Command: " + display);
         Emit("--------------------------------");
 
-        var exitCode = await _runner.RunAsync(exe, arguments, _workingDir, env, captured: null, ct);
+        var exitCode = await _runner.RunAsync(exe, arguments, _workingDir, env, captured: null, ct, standardInput);
         if (exitCode == 0)
             return;
 

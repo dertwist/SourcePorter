@@ -18,6 +18,29 @@ public sealed class MissingAssetRepairReport
     /// <summary>Distinct materials the repair attempted to import across all rounds.</summary>
     public int MaterialsImported { get; set; }
 
+    /// <summary>Distinct sources found inside the stock CS:GO VPK archives.</summary>
+    public int SourcedFromCsgoVpk { get; set; }
+
+    /// <summary>Distinct sources found in the map's custom content (e.g. a decompiled BSP's unpack).</summary>
+    public int SourcedFromCustomContent { get; set; }
+
+    /// <summary>
+    /// Tool materials written by the non-binary <c>MaterialConverter</c> fallback because
+    /// <c>source1import</c> blacklists them (e.g. <c>tools/toolsclip_*</c>) and won't import them.
+    /// </summary>
+    public int MaterialsConvertedNonBinary { get; set; }
+
+    /// <summary><c>error.vfx</c> materials remapped to the correct shader from their embedded
+    /// <c>legacy_import</c> VMT (e.g. a water material source1import couldn't map).</summary>
+    public int ErrorMaterialsRemapped { get; set; }
+
+    /// <summary>
+    /// Source paths the repair could not find in either CS:GO VPKs or custom content — genuinely
+    /// sourceless assets (e.g. break-model children absent from the BSP unpack and the install).
+    /// Reported honestly; never imported.
+    /// </summary>
+    public List<string> Unsourced { get; } = [];
+
     /// <summary>The validation report after the final round (the authoritative end state).</summary>
     public ValidationReport FinalReport { get; set; } = new();
 
@@ -51,8 +74,13 @@ public sealed class MissingAssetImporter(MapImportService service, Cs2Install cs
     /// Repairs <paramref name="initialReport"/>'s un-imported materials/models against
     /// <paramref name="project"/>, looping at most <paramref name="maxRounds"/> times.
     /// </summary>
+    /// <param name="bspPath">The original <c>.bsp</c> (when porting one), so the repair can read its
+    /// embedded pakfile directly — finding custom files BSPSource didn't unpack.</param>
+    /// <param name="extraContentRoots">Additional custom-content folders to search (e.g. the
+    /// <c>.bsp</c>'s own directory).</param>
     public async Task<MissingAssetRepairReport> RepairAsync(
-        PortProject project, ValidationReport initialReport, int maxRounds = 4, CancellationToken ct = default)
+        PortProject project, ValidationReport initialReport, int maxRounds = 4, CancellationToken ct = default,
+        string? bspPath = null, IEnumerable<string>? extraContentRoots = null)
     {
         var result = new MissingAssetRepairReport
         {
@@ -64,24 +92,59 @@ public sealed class MissingAssetImporter(MapImportService service, Cs2Install cs
         // reappearing in each report) is attempted once, not every round — this is also what
         // guarantees the loop terminates.
         var attempted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unsourced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var report = initialReport;
+
+        // Search both the stock CS:GO VPKs and the map's custom content for each missing asset's
+        // Source 1 source, so we only fire the toolchain at files that actually exist.
+        using var locator = new S1SourceLocator(
+            project.S1GameInfoDir, project.S1ContentDir, extraContentRoots, bspPath);
+        OnLog?.Invoke(
+            $"Searching {locator.CsgoVpkCount} CS:GO VPK archive(s), custom content, and " +
+            $"{locator.BspEmbeddedCount} BSP-embedded file(s) for missing sources…");
 
         for (var round = 1; round <= maxRounds; round++)
         {
             ct.ThrowIfCancellationRequested();
 
-            var (models, materials) = PlanFromReport(report);
-            models = models.Where(m => attempted.Add("m|" + m)).ToList();
-            materials = materials.Where(m => attempted.Add("t|" + m)).ToList();
-            if (models.Count == 0 && materials.Count == 0)
+            var (allModels, allMaterials) = PlanFromReport(report);
+            var models = Classify(allModels, "m|", locator, attempted, unsourced, result, "model");
+            var materials = Classify(allMaterials, "t|", locator, attempted, unsourced, result, "material");
+
+            // Tool materials (e.g. tools/toolsclip_*) are blacklisted by source1import — it refuses
+            // to import them. Pull them out of both groups and convert them with the non-binary
+            // MaterialConverter (which emits a correct, texture-free `generic.vfx` tools .vmat).
+            var toolMaterials = ExtractToolMaterials(materials.Stock)
+                .Concat(ExtractToolMaterials(materials.Custom)).ToList();
+
+            var total = models.Stock.Count + models.Custom.Count
+                + materials.Stock.Count + materials.Custom.Count + toolMaterials.Count;
+            if (total == 0)
                 break;
 
             OnLog?.Invoke(
-                $"Repair round {round}: importing {models.Count} model(s) and {materials.Count} material(s) the importer missed…");
+                $"Repair round {round}: importing {models.Stock.Count + models.Custom.Count} model(s), " +
+                $"{materials.Stock.Count + materials.Custom.Count} material(s), and converting " +
+                $"{toolMaterials.Count} tool material(s) the importer missed…");
 
-            await service.ImportSpecificAssetsAsync(project, models, materials, ct);
-            result.ModelsImported += models.Count;
-            result.MaterialsImported += materials.Count;
+            // Stock (CS:GO VPK) assets import through the real csgo gameinfo dir (stockOnly: true);
+            // custom (BSP-unpacked) assets through the staged content root. Mixing them makes
+            // source1import miss the stock ones — see ImportSpecificAssetsAsync.
+            if (models.Stock.Count > 0 || materials.Stock.Count > 0)
+                await service.ImportSpecificAssetsAsync(project, models.Stock, materials.Stock, ct, stockOnly: true);
+            // Custom assets the locator found only in the BSP's embedded pakfile aren't on disk, so
+            // source1import/cs_mdl_import can't read them — extract them (and a material's textures)
+            // into the staged content root first.
+            ExtractBspEmbeddedToDisk(project, locator, materials.Custom, models.Custom);
+
+            if (models.Custom.Count > 0 || materials.Custom.Count > 0)
+                await service.ImportSpecificAssetsAsync(project, models.Custom, materials.Custom, ct);
+
+            var converted = ConvertToolMaterials(project, locator, toolMaterials);
+            result.MaterialsConvertedNonBinary += converted;
+
+            result.ModelsImported += models.Stock.Count + models.Custom.Count;
+            result.MaterialsImported += materials.Stock.Count + materials.Custom.Count;
             result.Rounds = round;
 
             // Re-validate to confirm what resolved and surface any deeper transitive deps.
@@ -92,7 +155,187 @@ public sealed class MissingAssetImporter(MapImportService service, Cs2Install cs
                 $"Repair round {round} complete: {report.MissingImportCount} material/model(s) still un-imported.");
         }
 
+        // Fix any material source1import left as error.vfx (e.g. water) by re-converting its embedded
+        // legacy_import VMT — independent of the missing-import loop above (these .vmat exist on disk).
+        var remap = Materials.ErrorVmatRemapper.FixAddon(cs2.ContentAddonDir(project.AddonName), OnLog);
+        result.ErrorMaterialsRemapped = remap.Remapped;
+        if (remap.Remapped > 0)
+            OnLog?.Invoke($"Remapped {remap.Remapped} error.vfx material(s) to the correct shader.");
+
+        result.Unsourced.AddRange(unsourced.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+        if (result.Unsourced.Count > 0)
+            OnLog?.Invoke(
+                $"{result.Unsourced.Count} asset(s) had no Source 1 source in the CS:GO VPKs or custom content — left as missing.");
+
         return result;
+    }
+
+    /// <summary>
+    /// Splits sources into those found in the stock CS:GO VPKs vs the map's custom content (the two
+    /// import through different gameinfo dirs), recording where each came from and collecting the
+    /// genuinely-sourceless ones. Each source is considered once (the <paramref name="attempted"/>
+    /// set) so a sourceless asset that reappears every round is not re-searched — this also bounds
+    /// the loop.
+    /// </summary>
+    private (List<string> Stock, List<string> Custom) Classify(
+        IEnumerable<string> sources, string keyPrefix, S1SourceLocator locator,
+        HashSet<string> attempted, HashSet<string> unsourced,
+        MissingAssetRepairReport result, string kindLabel)
+    {
+        var stock = new List<string>();
+        var custom = new List<string>();
+        foreach (var source in sources)
+        {
+            if (!attempted.Add(keyPrefix + source))
+                continue; // already considered in an earlier round
+
+            switch (locator.Locate(source.Replace('\\', '/')))
+            {
+                case S1Source.CustomContent:
+                    result.SourcedFromCustomContent++;
+                    custom.Add(source);
+                    break;
+                case S1Source.CsgoVpk:
+                    result.SourcedFromCsgoVpk++;
+                    stock.Add(source);
+                    break;
+                default:
+                    unsourced.Add(source);
+                    OnLog?.Invoke($"No Source 1 source found for {kindLabel}: {source}");
+                    break;
+            }
+        }
+        return (stock, custom);
+    }
+
+    /// <summary>
+    /// Removes tool materials (which <c>source1import</c> blacklists) from <paramref name="materials"/>
+    /// and returns them, so they can be converted non-binarily instead. A material is a tool material
+    /// when its <c>.vmt</c> has <c>%compile*</c> keys or it lives under <c>materials/tools/</c>.
+    /// </summary>
+    internal static List<string> ExtractToolMaterials(List<string> materials)
+    {
+        var tools = new List<string>();
+        materials.RemoveAll(vmt =>
+        {
+            var isTool = Materials.VmtFile.IsToolMaterialPath(vmt);
+            if (isTool)
+                tools.Add(vmt);
+            return isTool;
+        });
+        return tools;
+    }
+
+    // Common .vmt keys whose value is a texture path (extension-less, under materials/).
+    private static readonly string[] TextureKeys =
+    [
+        "$basetexture", "$basetexture2", "$basetexture3", "$basetexture4", "$bumpmap", "$normalmap",
+        "$bumpmap2", "$normalmap2", "$envmapmask", "$detail", "$blendmodulatetexture",
+        "$phongexponenttexture", "$selfillummask", "$ao", "$tintmasktexture",
+    ];
+
+    // Sibling files cs_mdl_import needs alongside a .mdl.
+    private static readonly string[] ModelSiblings = [".vvd", ".dx90.vtx", ".dx80.vtx", ".vtx", ".phy", ".ani"];
+
+    /// <summary>
+    /// Extracts custom assets that exist only in the BSP's embedded pakfile (not unpacked to disk)
+    /// into the staged content root, so the toolchain can read them: each <c>.mdl</c> with its
+    /// render/physics siblings, and each <c>.vmt</c> with the <c>.vtf</c> textures it references.
+    /// </summary>
+    private void ExtractBspEmbeddedToDisk(
+        PortProject project, S1SourceLocator locator,
+        IReadOnlyList<string> materialVmts, IReadOnlyList<string> modelMdls)
+    {
+        var root = project.S1ContentDir;
+        if (string.IsNullOrEmpty(root))
+            return;
+
+        foreach (var mdl in modelMdls)
+        {
+            var forward = mdl.Replace('\\', '/');
+            Extract(locator, root, forward);
+            var stem = forward[..^4]; // drop ".mdl"
+            foreach (var ext in ModelSiblings)
+                Extract(locator, root, stem + ext);
+        }
+
+        foreach (var vmt in materialVmts)
+        {
+            var forward = vmt.Replace('\\', '/');
+            Extract(locator, root, forward);
+
+            var text = locator.TryReadText(forward);
+            if (text is null)
+                continue;
+            var parsed = Materials.VmtFile.Parse(text);
+            foreach (var key in TextureKeys)
+            {
+                var tex = parsed[key];
+                if (string.IsNullOrWhiteSpace(tex))
+                    continue;
+                var vtf = "materials/" + tex.Replace('\\', '/').Trim('/') + ".vtf";
+                Extract(locator, root, vtf);
+            }
+        }
+    }
+
+    /// <summary>Writes a pakfile-only source into <paramref name="root"/> on disk (no-op otherwise).</summary>
+    private void Extract(S1SourceLocator locator, string root, string forwardPath)
+    {
+        if (!locator.IsOnlyInBspPak(forwardPath))
+            return;
+        var bytes = locator.TryReadBytes(forwardPath);
+        if (bytes is null)
+            return;
+        try
+        {
+            var outPath = Path.Combine(root, forwardPath.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+            File.WriteAllBytes(outPath, bytes);
+            OnLog?.Invoke($"Extracted BSP-embedded file: {forwardPath}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            OnLog?.Invoke($"Could not extract {forwardPath}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Writes a <c>.vmat</c> for each tool material straight from its located <c>.vmt</c> via the
+    /// non-binary <see cref="Materials.MaterialConverter"/> — no toolchain. Returns the count written.
+    /// </summary>
+    private int ConvertToolMaterials(PortProject project, S1SourceLocator locator, IReadOnlyList<string> toolVmts)
+    {
+        if (toolVmts.Count == 0)
+            return 0;
+
+        var contentRoot = cs2.ContentAddonDir(project.AddonName);
+        var converted = 0;
+        foreach (var vmt in toolVmts)
+        {
+            var forward = vmt.Replace('\\', '/');
+            var text = locator.TryReadText(forward);
+            if (text is null)
+                continue;
+
+            try
+            {
+                var parsed = Materials.VmtFile.Parse(text, locator.TryReadText, sourcePath: forward);
+                var doc = new Materials.VmtToVmatConverter().Convert(parsed);
+
+                var rel = Path.ChangeExtension(forward, ".vmat").Replace('/', Path.DirectorySeparatorChar);
+                var outPath = Path.Combine(contentRoot, rel);
+                Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+                File.WriteAllText(outPath, doc.ToText(Path.GetFileName(forward)));
+                converted++;
+                OnLog?.Invoke($"Converted tool material (non-binary): {forward}");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                OnLog?.Invoke($"Could not write tool material {forward}: {ex.Message}");
+            }
+        }
+        return converted;
     }
 
     /// <summary>

@@ -20,6 +20,60 @@ public static class MapStaging
     public static string StagingRoot => Path.Combine(Path.GetTempPath(), "SourcePorter");
 
     /// <summary>
+    /// Deletes the whole staging root (every per-map BSP decompile / unpacked-embedded
+    /// content cache) and reports how many bytes were reclaimed. These dirs are throwaway
+    /// scratch space — each import re-creates its own via <see cref="FreshRoot"/> — so
+    /// clearing them is always safe. Returns the number of bytes freed (0 if nothing was
+    /// cached). Never throws if the root is absent.
+    /// </summary>
+    public static long CleanCache()
+    {
+        if (!Directory.Exists(StagingRoot))
+            return 0;
+        var bytes = DirSize(StagingRoot);
+        SafeDeleteTree(StagingRoot);
+        return bytes;
+    }
+
+    /// <summary>
+    /// Recursively deletes <paramref name="dir"/>, removing any directory <b>junction</b>/symlink
+    /// as a link rather than following it into — and deleting — its target. A plain
+    /// <c>Directory.Delete(recursive)</c> can throw on a tree that contains a reparse point.
+    /// </summary>
+    internal static void SafeDeleteTree(string dir)
+    {
+        foreach (var sub in Directory.EnumerateDirectories(dir))
+        {
+            if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0)
+                Directory.Delete(sub); // a junction/symlink: drop the link only
+            else
+                SafeDeleteTree(sub);
+        }
+        foreach (var file in Directory.EnumerateFiles(dir))
+            File.Delete(file);
+        Directory.Delete(dir);
+    }
+
+    /// <summary>Total size of real files under <paramref name="dir"/>, NOT following directory
+    /// junctions (so a <c>csgo</c> junction doesn't make us count the whole CS:GO install).</summary>
+    private static long DirSize(string dir)
+    {
+        long bytes = 0;
+        foreach (var sub in Directory.EnumerateDirectories(dir))
+        {
+            if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0)
+                continue;
+            bytes += DirSize(sub);
+        }
+        foreach (var file in Directory.EnumerateFiles(dir))
+        {
+            try { bytes += new FileInfo(file).Length; }
+            catch { /* a file vanishing mid-walk shouldn't abort the cleanup */ }
+        }
+        return bytes;
+    }
+
+    /// <summary>
     /// Ensures <paramref name="vmfPath"/> is usable as a source map. A correctly
     /// structured map that <c>source1import</c> already accepts (under a <c>maps\</c>
     /// folder, with the required header) is used in place — preserving its sibling
@@ -82,7 +136,7 @@ public static class MapStaging
     {
         var root = Path.Combine(StagingRoot, mapName);
         if (Directory.Exists(root))
-            Directory.Delete(root, recursive: true);
+            SafeDeleteTree(root); // may contain a csgo junction from a previous run
         Directory.CreateDirectory(root);
         return root;
     }
