@@ -79,8 +79,12 @@ Hammer steps.
 
 - ⬜ **VMF pre-import analysis** (§1.1–1.2.1): stripper `.cfg` application;
   scan for broken/reserved outputs, `HINT`/`SKIP`, `func_wall`, surf ramps.
-- ⬜ **Post-import `.vmap` fix-ups** (§1.2.3): strip `(null)` params, delete
-  origin meshes (the uncompiled `.vmap` is DMX — needs a Datamodel reader).
+- 🔨 **Post-import `.vmap` tools** (`Vmap/`, via the KeyValues2 Datamodel
+  reader/writer): ✅ **Collapse prefabs** (merge the sub-maps into the root map,
+  keeping the files) and ✅ **Skybox template** (a separate `_sky.vmap` flagged
+  skybox + a `skybox_reference` at `0 0 0`) — both run automatically after an
+  import behind a GUI checkbox / CLI flag. ⬜ Remaining §1.2.3 fix-ups: strip
+  `(null)` params, delete origin meshes, rewrite classnames.
 - ⬜ **Entity remapping** (§1.3–1.4): data-driven S1→S2 rules + report.
 - ⬜ **Packaging** (§1.18): `gameinfo.gi` whitelist edit, `.los`/unused exclusion,
   `.vpk` build.

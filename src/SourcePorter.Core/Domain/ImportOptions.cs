@@ -47,6 +47,7 @@ public sealed class ImportOptions
     /// <summary>
     /// Max concurrent tool processes for the dependency phase (model import +
     /// material compile run in parallel). 1 = sequential (matches the Python).
+    /// Defaults to all available logical processors minus one (min 1).
     /// </summary>
-    public int MaxParallelism { get; set; } = 4;
+    public int MaxParallelism { get; set; } = Math.Max(1, Environment.ProcessorCount - 1);
 }

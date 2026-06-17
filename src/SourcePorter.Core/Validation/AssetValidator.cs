@@ -29,7 +29,13 @@ public enum AssetIssueKind
 /// <param name="Kind">What went wrong.</param>
 /// <param name="Source">The content file being checked (relative to its addon dir).</param>
 /// <param name="Detail">The missing reference name, or the error message.</param>
-public sealed record AssetIssue(AssetIssueKind Kind, string Source, string Detail);
+/// <param name="ReferencePath">
+/// The bare asset path the issue is about (e.g. <c>models/foo.vmdl</c>), without the
+/// human-readable suffix in <paramref name="Detail"/>. Set for reference issues so a
+/// repair pass can map it back to a Source 1 source without parsing <paramref name="Detail"/>;
+/// null for <see cref="AssetIssueKind.ReadError"/>.
+/// </param>
+public sealed record AssetIssue(AssetIssueKind Kind, string Source, string Detail, string? ReferencePath = null);
 
 /// <summary>The result of validating an addon.</summary>
 public sealed class ValidationReport
@@ -161,13 +167,13 @@ public sealed class AssetValidator(Cs2Install cs2, string addon)
                     report.Issues.Add(reference.Kind switch
                     {
                         ContentReferenceScanner.ReferenceKind.PrefabMap =>
-                            new AssetIssue(AssetIssueKind.MissingPrefab, rel, $"{reference.Path} (prefab map)"),
+                            new AssetIssue(AssetIssueKind.MissingPrefab, rel, $"{reference.Path} (prefab map)", reference.Path),
                         ContentReferenceScanner.ReferenceKind.Material =>
-                            new AssetIssue(AssetIssueKind.MissingImport, rel, $"{reference.Path} (material not imported)"),
+                            new AssetIssue(AssetIssueKind.MissingImport, rel, $"{reference.Path} (material not imported)", reference.Path),
                         ContentReferenceScanner.ReferenceKind.Model =>
-                            new AssetIssue(AssetIssueKind.MissingImport, rel, $"{reference.Path} (model not imported)"),
+                            new AssetIssue(AssetIssueKind.MissingImport, rel, $"{reference.Path} (model not imported)", reference.Path),
                         _ =>
-                            new AssetIssue(AssetIssueKind.MissingSource, rel, $"{reference.Path} (mesh source)"),
+                            new AssetIssue(AssetIssueKind.MissingSource, rel, $"{reference.Path} (mesh source)", reference.Path),
                     });
                 }
             }

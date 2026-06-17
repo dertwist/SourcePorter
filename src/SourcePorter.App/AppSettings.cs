@@ -25,14 +25,14 @@ public sealed class AppSettings
     /// <summary>"VMF" or "BSP" — the source map input type.</summary>
     public string InputMode { get; set; } = "VMF";
 
-    /// <summary>Max concurrent tool processes for the dependency phase.</summary>
-    public int Threads { get; set; } = 4;
-
-    /// <summary>Compile the imported .vmap to .vmap_c after import (slow lighting bake).</summary>
-    public bool CompileMap { get; set; }
-
     /// <summary>Unpack a .bsp's embedded materials/models when decompiling it.</summary>
     public bool UnpackEmbedded { get; set; } = true;
+
+    /// <summary>Post-import: merge the map's prefab/sub-map references into the root .vmap (off by default).</summary>
+    public bool CollapsePrefabs { get; set; }
+
+    /// <summary>Post-import: scaffold a 3D-skybox template (separate _sky.vmap + skybox_reference) (off by default).</summary>
+    public bool CreateSkyboxTemplate { get; set; }
 
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
 

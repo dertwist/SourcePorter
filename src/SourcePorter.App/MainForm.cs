@@ -4,6 +4,7 @@ using SourcePorter.App.Theme;
 using SourcePorter.Core.Domain;
 using SourcePorter.Core.Toolchain;
 using SourcePorter.Core.Validation;
+using SourcePorter.Core.Vmap;
 
 namespace SourcePorter.App;
 
@@ -25,13 +26,12 @@ public sealed class MainForm : Form
     private readonly CheckBox _noMerge = new() { Text = "Don't merge instances" };
     private readonly CheckBox _skipDeps = new() { Text = "Skip dependencies" };
     private readonly CheckBox _compileAssets = new() { Text = "Compile Assets" };
-    private readonly CheckBox _compileMap = new() { Text = "Compile map" };
     private readonly CheckBox _compactLog = new() { Text = "Compact log" };
     private readonly CheckBox _unpackEmbedded = new() { Text = "Unpack embedded content" };
-    private readonly BorderedComboBox _threads = new();
+    private readonly CheckBox _collapsePrefabs = new() { Text = "Collapse prefabs" };
+    private readonly CheckBox _skyboxTemplate = new() { Text = "Skybox template" };
     private ThemedGroupBox? _bspOptions; // BSP-only option group; shown only in BSP input mode
 
-    private int ThreadsValue => int.TryParse(_threads.SelectedItem as string, out var n) ? n : 4;
     private TableLayoutPanel? _inputGrid; // the field grid, kept so we can tone its labels
     private readonly Button _import = new() { Text = "Import" };
     private readonly Button _cancel = new() { Text = "Cancel", Enabled = false };
@@ -51,7 +51,7 @@ public sealed class MainForm : Form
         Text = "Source Porter";
         Icon = LoadAppIcon();
         MinimumSize = new Size(820, 560);
-        Size = new Size(1040, 700);
+        Size = new Size(1366, 651);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 10f);
 
@@ -66,7 +66,7 @@ public sealed class MainForm : Form
         _logFlushTimer.Start();
         FormClosing += (_, _) => _logFlushTimer.Stop();
 
-        AppendConsole($"SourcePorter v{Application.ProductVersion}", Themer.CurrentThemeColors.Accent);
+        AppendConsole($"SourcePorter v{Application.ProductVersion.Split('+')[0]}", Themer.CurrentThemeColors.Accent);
         AppendConsole("Set the CS2 directory and a source .vmf, then press Import.", Themer.CurrentThemeColors.ContrastSoft);
 
         TryAutoDetectCs2Directory();
@@ -102,6 +102,7 @@ public sealed class MainForm : Form
         // --- menu ---
         var menu = new MenuStrip { Renderer = new DarkToolStripRenderer(new CustomColorTable()) };
         var tools = new ToolStripMenuItem("&Tools");
+        tools.DropDownItems.Add("&Import missing assets…", Themer.GetIcon("Recover", 16), async (_, _) => await RunImportMissingAsync());
         tools.DropDownItems.Add("&Configs Editor…", Themer.GetIcon("Settings", 16), (_, _) => new ConfigsEditorForm().Show(this));
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add("&Reference…", Themer.GetIcon("Find", 16), (_, _) => new ReferenceForm().Show(this));
@@ -152,7 +153,7 @@ public sealed class MainForm : Form
         AddField(form, 2, "Output Addon", _outputAddon, "Open", OpenOutputAddonFolder);
 
         // --- options, grouped by stage; the BSP group shows only in BSP mode ---
-        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileAssets.AutoSize = _compileMap.AutoSize = _compactLog.AutoSize = _unpackEmbedded.AutoSize = true;
+        _useBsp.AutoSize = _noMerge.AutoSize = _skipDeps.AutoSize = _compileAssets.AutoSize = _compactLog.AutoSize = _unpackEmbedded.AutoSize = _collapsePrefabs.AutoSize = _skyboxTemplate.AutoSize = true;
         _useBsp.CheckedChanged += (_, _) => { if (_useBsp.Checked) _noMerge.Checked = false; };
         _noMerge.CheckedChanged += (_, _) => { if (_noMerge.Checked) _useBsp.Checked = false; };
 
@@ -160,23 +161,16 @@ public sealed class MainForm : Form
         _bspOptions = MakeOptionGroup("BSP decompile", Themer.CurrentThemeColors.Accent, _unpackEmbedded);
         _bspOptions.Margin = new Padding(0, 4, 10, 0);
 
-        for (var i = 1; i <= 16; i++)
-            _threads.Items.Add(i.ToString());
-        _threads.Width = 56;
-        _threads.Margin = new Padding(0, 3, 0, 3);
-        _threads.BorderColor = Themer.CurrentThemeColors.Border;
-
-        var threads = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
-        threads.Controls.Add(new Label { Text = "Threads:", AutoSize = true, Margin = new Padding(10, 6, 4, 3) });
-        threads.Controls.Add(_threads);
-        var importOptions = MakeOptionGroup("Import options", Themer.CurrentThemeColors.Border, _useBsp, _noMerge, _skipDeps, _compileAssets, _compileMap, _compactLog, threads);
+        var importOptions = MakeOptionGroup("Import options", Themer.CurrentThemeColors.Border, _useBsp, _noMerge, _skipDeps, _compileAssets, _compactLog, _collapsePrefabs, _skyboxTemplate);
         importOptions.Margin = new Padding(0, 4, 0, 0);
 
         var optionsRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Margin = new Padding(0, 0, 0, 4) };
         optionsRow.Controls.Add(_bspOptions);
         optionsRow.Controls.Add(importOptions);
-        form.Controls.Add(optionsRow, 1, 3);
-        form.SetColumnSpan(optionsRow, 2);
+        // Span all three columns from column 0 so the option groups use the full width and
+        // don't leave the label column blank to their left.
+        form.Controls.Add(optionsRow, 0, 3);
+        form.SetColumnSpan(optionsRow, 3);
 
         var actions = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 6, 0, 2) };
         _import.Width = 120;
@@ -191,8 +185,8 @@ public sealed class MainForm : Form
         _cancel.Click += (_, _) => CancelImport();
         actions.Controls.Add(_import);
         actions.Controls.Add(_cancel);
-        form.Controls.Add(actions, 1, 4);
-        form.SetColumnSpan(actions, 2);
+        form.Controls.Add(actions, 0, 4);
+        form.SetColumnSpan(actions, 3);
 
         // --- console ---
         _console.Dock = DockStyle.Fill;
@@ -291,7 +285,7 @@ public sealed class MainForm : Form
         // the value text is the emphasis — matches the reference. The Themer paints
         // them with the window colour, so re-assert it here after ApplyTheme.
         var well = Themer.CurrentThemeColors.AppMiddle;
-        foreach (Control field in new Control[] { _cs2Dir, _sourceMap, _outputAddon, _inputMode, _threads })
+        foreach (Control field in new Control[] { _cs2Dir, _sourceMap, _outputAddon, _inputMode })
             field.BackColor = well;
 
         MuteGroupTitles(this, muted);
@@ -428,7 +422,14 @@ public sealed class MainForm : Form
 
         var source = _sourceMap.Text.Trim();
         if (source.Length == 0 || !File.Exists(source)) { AppendConsole("Source map file not found.", red); return; }
-        if (_outputAddon.Text.Trim().Length == 0) { AppendConsole("Enter an output addon name.", red); return; }
+        if (_outputAddon.Text.Trim().Length == 0)
+        {
+            AppendConsole("Enter an output addon name.", red);
+            MessageBox.Show(this, "Enter an output addon name before importing.",
+                "Output addon required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _outputAddon.Focus();
+            return;
+        }
 
         SaveSettings(); // persist the inputs before a long-running import
 
@@ -462,14 +463,28 @@ public sealed class MainForm : Form
             }
             AppendConsole($"Source staged → {vmf}", muted);
 
+            // A BSPSource-decompiled map is flat — every func_instance is inlined into the
+            // world, so there are no instances to merge, and plain -usebsp can crash
+            // source1import's merge pass on such maps. Prefer -usebsp_nomergeinstances for
+            // decompiled input (the checkbox state is left as the user set it).
+            var useBsp = _useBsp.Checked;
+            var noMerge = _noMerge.Checked;
+            if (bspMode && useBsp)
+            {
+                useBsp = false;
+                noMerge = true;
+                AppendConsole("Decompiled BSP: using -usebsp_nomergeinstances (a flat decompiled map has " +
+                              "no instances to merge, and plain -usebsp can crash source1import).", muted);
+            }
+
             var project = cs2.BuildProject(vmf, addon, new ImportOptions
             {
-                UseBsp = _useBsp.Checked,
-                UseBspNoMergeInstances = _noMerge.Checked,
+                UseBsp = useBsp,
+                UseBspNoMergeInstances = noMerge,
                 SkipDeps = _skipDeps.Checked,
                 CompileAssets = _compileAssets.Checked,
                 CompactLog = _compactLog.Checked,
-                MaxParallelism = ThreadsValue,
+                // MaxParallelism defaults to all logical processors minus one.
             });
 
             service = new MapImportService(cs2.Tools, runner, ResolveImportScriptsDir(cs2));
@@ -478,20 +493,18 @@ public sealed class MainForm : Form
             SetStatus($"Importing {project.MapName} → {addon}…");
             await Task.Run(() => service.ImportAsync(project, _cts.Token));
 
-            if (_compileMap.Checked)
-            {
-                AppendConsole($"Compiling {project.MapName} → .vmap_c…", muted);
-                await Task.Run(() => service.CompileMapAsync(project, _cts.Token));
-            }
-
             AppendConsole($"Done. Imported {project.MapName} into addon '{addon}'.", Themer.CurrentThemeColors.Accent);
             SetStatus("Import complete.");
+
+            // Opt-in post-import .vmap edits, before stats/validation so those reflect the final map.
+            await RunPostImportVmapToolsAsync(cs2, addon, project.MapName, _cts.Token);
 
             ReportAddonStats(cs2, addon);
 
             // Validation checks compiled-resource RERL deps AND uncompiled model sources
             // (missing .dmx/.fbx/.vmdl), so it's worth running even on the fast no-compile
-            // path — the source-dependency pass works without any _c files.
+            // path — the source-dependency pass works without any _c files. Repairing the
+            // missing materials/models is a separate, manual step (Tools → Import missing assets).
             await ValidateAddonAsync(cs2, addon, _cts.Token);
         }
         catch (OperationCanceledException)
@@ -507,6 +520,129 @@ public sealed class MainForm : Form
         finally
         {
             if (service is not null) service.OnLog -= LogFromWorker;
+            _cts.Dispose();
+            _cts = null;
+            SetRunning(false);
+        }
+    }
+
+    /// <summary>
+    /// Runs the opt-in post-import <c>.vmap</c> edits (Collapse prefabs, Skybox template) on the
+    /// freshly-imported main map, before stats/validation so those reflect the final map. Shares
+    /// the import's cancellation token; non-cancellation failures are reported without failing the
+    /// (already successful) import. See <see cref="PostImportVmapTools"/>.
+    /// </summary>
+    private async Task RunPostImportVmapToolsAsync(Cs2Install cs2, string addon, string mapName, CancellationToken ct)
+    {
+        if (!_collapsePrefabs.Checked && !_skyboxTemplate.Checked)
+            return;
+
+        var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
+        try
+        {
+            if (_collapsePrefabs.Checked)
+            {
+                SetStatus("Collapsing prefabs…");
+                await Task.Run(() => PostImportVmapTools.CollapsePrefabs(cs2, addon, mapName, LogFromWorker, ct), ct);
+            }
+
+            if (_skyboxTemplate.Checked)
+            {
+                SetStatus("Creating skybox template…");
+                await Task.Run(() => PostImportVmapTools.CreateSkyboxTemplate(cs2, addon, mapName, LogFromWorker, ct), ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AppendConsole($"Post-import vmap tools error: {ex.Message}", red);
+        }
+    }
+
+    /// <summary>
+    /// Tools → Import missing assets. Validates the already-imported addon and re-imports
+    /// the materials/models the main import missed (a model's gib/breakpiece children, a
+    /// skybox material from a lighting prefab, …), looping import→re-validate to a fixpoint
+    /// via <see cref="MissingAssetImporter"/>. Runs against the current CS2 directory + output
+    /// addon, independently of the source map — so it can repair any previously-imported addon.
+    /// Shares the running-state and cancellation token with <see cref="RunImportAsync"/>, so
+    /// only one runs at a time and Cancel aborts it.
+    /// </summary>
+    private async Task RunImportMissingAsync()
+    {
+        var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
+        var muted = Themer.CurrentThemeColors.ContrastSoft;
+
+        if (_cts is not null)
+        {
+            AppendConsole("An import is already running.", muted);
+            return;
+        }
+
+        var cs2 = new Cs2Install(_cs2Dir.Text.Trim());
+        string? error = _cs2Dir.Text.Trim().Length == 0 ? "Set the CS2 directory."
+            : !Directory.Exists(cs2.InstallRoot) ? $"CS2 directory not found: {cs2.InstallRoot}"
+            : cs2.IsValid(out var v) ? null : v;
+        if (error is not null) { AppendConsole(error, red); return; }
+
+        var addon = _outputAddon.Text.Trim();
+        if (addon.Length == 0) { AppendConsole("Enter an output addon name.", red); return; }
+        if (!Directory.Exists(cs2.ContentAddonDir(addon)))
+        {
+            AppendConsole($"Addon content not found: {cs2.ContentAddonDir(addon)}. Import the map first.", red);
+            return;
+        }
+
+        var runner = new ProcessRunner();
+        var service = new MapImportService(cs2.Tools, runner, ResolveImportScriptsDir(cs2));
+        service.OnLog += LogFromWorker;
+
+        // Repair only needs the install-derived paths + addon (the missing assets are
+        // re-imported by exact path); the source map isn't required, so build a minimal
+        // project directly rather than via Cs2Install.BuildProject (which parses a .vmf).
+        var project = new PortProject
+        {
+            S1GameInfoDir = cs2.S1GameInfoDir,
+            S2GameInfoDir = cs2.S2GameInfoDir,
+            AddonName = addon,
+            MapName = addon,
+            Import = new ImportOptions
+            {
+                CompileAssets = _compileAssets.Checked,
+                CompactLog = _compactLog.Checked,
+                // MaxParallelism defaults to all logical processors minus one.
+            },
+        };
+
+        SetRunning(true);
+        _cts = new CancellationTokenSource();
+        try
+        {
+            var report = await ValidateAddonAsync(cs2, addon, _cts.Token);
+            if (report is null)
+                return; // validation error already reported
+
+            if (report.MissingImportCount == 0)
+            {
+                AppendConsole("No un-imported materials/models found — nothing to import.", Themer.CurrentThemeColors.Accent);
+                SetStatus("Nothing to import.");
+                return;
+            }
+
+            await RepairMissingAssetsAsync(cs2, service, project, report, _cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            AppendConsole("Import missing cancelled.", muted);
+            SetStatus("Cancelled.");
+        }
+        catch (Exception ex)
+        {
+            AppendConsole(ex.Message, red);
+            SetStatus("Import missing failed.");
+        }
+        finally
+        {
+            service.OnLog -= LogFromWorker;
             _cts.Dispose();
             _cts = null;
             SetRunning(false);
@@ -542,7 +678,7 @@ public sealed class MainForm : Form
     /// propagate to the import's handler; other failures are reported without marking
     /// the (already successful) import as failed.
     /// </summary>
-    private async Task ValidateAddonAsync(Cs2Install cs2, string addon, CancellationToken ct)
+    private async Task<ValidationReport?> ValidateAddonAsync(Cs2Install cs2, string addon, CancellationToken ct)
     {
         var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
         SetStatus($"Validating {addon}…");
@@ -589,11 +725,60 @@ public sealed class MainForm : Form
                     Themer.CurrentThemeColors.Accent);
                 SetStatus("Validation passed.");
             }
+
+            return report;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             AppendConsole($"Validation error: {ex.Message}", red);
             SetStatus("Validation failed.");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Re-imports the materials/models the validator reported as un-imported, then prints a
+    /// summary. Looping and re-validation live in <see cref="MissingAssetImporter"/>; this
+    /// just wires it to the console and reuses the import <paramref name="service"/> (same
+    /// tools and working dir). Like validation, it shares the import's running-state and
+    /// cancellation token, so Cancel aborts it too.
+    /// </summary>
+    private async Task RepairMissingAssetsAsync(
+        Cs2Install cs2, MapImportService service, PortProject project, ValidationReport report, CancellationToken ct)
+    {
+        var muted = Themer.CurrentThemeColors.ContrastSoft;
+        var red = Themer.CurrentThemeColors.ControlBoxHighlightCloseButton;
+
+        var importer = new MissingAssetImporter(service, cs2);
+        importer.OnLog += LogFromWorker;
+        SetStatus("Importing missing assets…");
+        try
+        {
+            AppendConsole(
+                $"Re-importing {report.MissingImportCount} material/model(s) the importer missed…",
+                muted);
+
+            var result = await Task.Run(() => importer.RepairAsync(project, report, ct: ct));
+
+            AppendConsole(
+                $"Repair imported {result.ModelsImported} model(s) and {result.MaterialsImported} material(s) " +
+                $"across {result.Rounds} round(s): resolved {result.Resolved} of {result.InitialMissing}.",
+                result.StillMissing == 0 ? Themer.CurrentThemeColors.Accent : muted);
+
+            if (result.StillMissing > 0)
+                AppendConsole(
+                    $"{result.StillMissing} material/model(s) still un-imported — no Source 1 source was found for them " +
+                    "(they may be genuinely absent from this CS:GO install).", red);
+            else
+                SetStatus("Missing assets imported.");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AppendConsole($"Repair error: {ex.Message}", red);
+        }
+        finally
+        {
+            importer.OnLog -= LogFromWorker;
         }
     }
 
@@ -634,7 +819,7 @@ public sealed class MainForm : Form
         _import.Enabled = !running;
         _cancel.Enabled = running;
         _cs2Dir.Enabled = _sourceMap.Enabled = _outputAddon.Enabled = !running;
-        _inputMode.Enabled = _threads.Enabled = !running;
+        _inputMode.Enabled = !running;
     }
 
     // Thread-safe and cheap: the worker threads just enqueue. The actual RichTextBox
@@ -680,11 +865,11 @@ public sealed class MainForm : Form
         _noMerge.CheckedChanged += (_, _) => SaveSettings();
         _skipDeps.CheckedChanged += (_, _) => SaveSettings();
         _compileAssets.CheckedChanged += (_, _) => SaveSettings();
-        _compileMap.CheckedChanged += (_, _) => SaveSettings();
         _compactLog.CheckedChanged += (_, _) => SaveSettings();
         _unpackEmbedded.CheckedChanged += (_, _) => SaveSettings();
+        _collapsePrefabs.CheckedChanged += (_, _) => SaveSettings();
+        _skyboxTemplate.CheckedChanged += (_, _) => SaveSettings();
         _inputMode.SelectedIndexChanged += (_, _) => { UpdateInputModeUi(); SaveSettings(); };
-        _threads.SelectedIndexChanged += (_, _) => SaveSettings();
     }
 
     private void SaveSettings() => CaptureSettings().Save();
@@ -706,12 +891,12 @@ public sealed class MainForm : Form
         _noMerge.Checked = _settings.UseBspNoMergeInstances;
         _skipDeps.Checked = _settings.SkipDeps;
         _compileAssets.Checked = _settings.CompileAssets;
-        _compileMap.Checked = _settings.CompileMap;
         _compactLog.Checked = _settings.CompactLog;
         _unpackEmbedded.Checked = _settings.UnpackEmbedded;
+        _collapsePrefabs.Checked = _settings.CollapsePrefabs;
+        _skyboxTemplate.Checked = _settings.CreateSkyboxTemplate;
         _inputMode.SelectedItem = _inputMode.Items.Contains(_settings.InputMode) ? _settings.InputMode : "VMF";
         UpdateInputModeUi();
-        _threads.SelectedItem = Math.Clamp(_settings.Threads, 1, 16).ToString();
         UpdateTitle();
     }
 
@@ -724,10 +909,10 @@ public sealed class MainForm : Form
         UseBspNoMergeInstances = _noMerge.Checked,
         SkipDeps = _skipDeps.Checked,
         CompileAssets = _compileAssets.Checked,
-        CompileMap = _compileMap.Checked,
         CompactLog = _compactLog.Checked,
         UnpackEmbedded = _unpackEmbedded.Checked,
+        CollapsePrefabs = _collapsePrefabs.Checked,
+        CreateSkyboxTemplate = _skyboxTemplate.Checked,
         InputMode = _inputMode.SelectedItem as string ?? "VMF",
-        Threads = ThreadsValue,
     };
 }

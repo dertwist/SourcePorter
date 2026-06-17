@@ -6,6 +6,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="SourcePorter.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!--
       VPK archive reader and KeyValues (KV1/KV3) reader used by the asset
       validator. Versions are the newest that still target net8.0/netstandard
@@ -14,6 +18,15 @@
     -->
     <PackageReference Include="ValvePak" Version="4.0.0.142" />
     <PackageReference Include="ValveKeyValue" Version="0.20.0.417" />
+
+    <!--
+      Datamodel (DMX) reader/writer for the uncompiled .vmap graph used by the
+      post-import Vmap/ tools (collapse prefabs, skybox template) — the same
+      package VRF uses for .vmap serialization. KeyValues2 0.8.0 targets net9.0
+      (NOT net10), so unlike the ValveKeyValue/ValvePak pins above it is
+      compatible with the current net9 TFM and does not gate on the net10 SDK.
+    -->
+    <PackageReference Include="KeyValues2" Version="0.8.0" />
 
     <!--
       Reads the Steam install path from the registry to auto-detect the CS2

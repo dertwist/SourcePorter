@@ -25,9 +25,10 @@ scripts to port maps from CS:GO to Counter-Strike 2.
 - **Fast imports.** By default the port imports all asset *sources* (materials
   and models) without the slow per-asset compile, so you can finish the map in
   Hammer. Tick **Compile Assets** to also compile them to `_c` (needed before
-  shipping the addon); **Compile map** bakes the `.vmap_c`.
-- **Addon verification.** After a compile it finds missing textures and models
-  and reports them in the console.
+  shipping the addon). Imports use all your CPU cores minus one.
+- **Addon verification.** After each import it finds missing textures and models
+  and reports them in the console. Use **Tools → Import missing assets** to
+  re-import the ones it can source from CS:GO.
 
 
 ## Requirements

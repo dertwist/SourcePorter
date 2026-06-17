@@ -131,6 +131,83 @@ public static partial class VmfNormalizer
         return repaired;
     }
 
+    /// <summary>
+    /// Removes <c>color_correction</c> entities whose lookup <c>.raw</c> file is not
+    /// present under <paramref name="contentRoot"/>. A decompiled map keeps its
+    /// <c>color_correction</c> entity pointing at a Source 1 <c>.raw</c> (e.g.
+    /// <c>materials/correction/cc_coastal.raw</c>) that BSPSource does not unpack;
+    /// <c>source1import</c> then <b>access-violates</b> (<i>"RelativePathToFullPath
+    /// failed"</i>) when it tries to import that missing file — after the <c>.vmap</c>
+    /// is written but before the refs list, so the whole dependency import is lost.
+    /// Stripping the unresolvable ones is the minimal fix; an entity whose <c>.raw</c>
+    /// <i>is</i> present is left untouched (lossless), so color correction survives when
+    /// the file was unpacked. Returns the number of entities removed. Idempotent.
+    /// </summary>
+    public static int EnsureNoUnresolvableColorCorrection(string vmfPath, string contentRoot, Action<string>? log = null)
+    {
+        var lines = File.ReadAllLines(vmfPath);
+        var output = new List<string>(lines.Length);
+        var removedFiles = new List<string>();
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].Trim() != "entity")
+            {
+                output.Add(lines[i]);
+                continue;
+            }
+
+            var end = FindBlockEnd(lines, i, out _);
+            if (end < 0)
+            {
+                output.Add(lines[i]); // malformed/truncated block — pass through untouched
+                continue;
+            }
+
+            var block = lines[i..(end + 1)];
+            if (IsColorCorrection(block) && !ColorCorrectionFileResolves(block, contentRoot, out var raw))
+                removedFiles.Add(raw); // drop the block (not appended to output)
+            else
+                output.AddRange(block);
+
+            i = end;
+        }
+
+        if (removedFiles.Count > 0)
+        {
+            File.WriteAllLines(vmfPath, output);
+            log?.Invoke($"Removed {removedFiles.Count} color_correction entit{(removedFiles.Count == 1 ? "y" : "ies")} " +
+                        $"whose lookup file is missing ({string.Join(", ", removedFiles)}) — source1import " +
+                        "access-violates on an unresolvable color-correction .raw. Re-add color correction in " +
+                        "Hammer (a Source 2 post-process volume) if the map needs it.");
+        }
+        return removedFiles.Count;
+    }
+
+    private static bool IsColorCorrection(IEnumerable<string> block) =>
+        block.Any(l => ClassnameRegex().Match(l) is { Success: true } m &&
+                       m.Groups[1].Value.Equals("color_correction", StringComparison.OrdinalIgnoreCase));
+
+    // True if the color_correction entity's .raw lookup file exists under contentRoot.
+    // A missing or empty "filename" can't resolve either, so it counts as unresolvable.
+    private static bool ColorCorrectionFileResolves(string[] block, string contentRoot, out string raw)
+    {
+        raw = "(no filename)";
+        foreach (var line in block)
+        {
+            var m = FilenameRegex().Match(line);
+            if (!m.Success)
+                continue;
+            var value = m.Groups[1].Value;
+            if (value.Length == 0)
+                return false;
+            raw = value;
+            var rel = value.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+            return File.Exists(Path.Combine(contentRoot, rel));
+        }
+        return false;
+    }
+
     // Index of the "}" that closes the block whose header is at lines[headerIndex],
     // or -1 if not found. Sets `open` to the index of the block's "{".
     private static int FindBlockEnd(string[] lines, int headerIndex, out int open)
@@ -188,4 +265,12 @@ public static partial class VmfNormalizer
 
     [System.Text.RegularExpressions.GeneratedRegex(@"^\s*""power""\s+""(\d+)""")]
     private static partial System.Text.RegularExpressions.Regex PowerRegex();
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^\s*""classname""\s+""([^""]*)""",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
+    private static partial System.Text.RegularExpressions.Regex ClassnameRegex();
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^\s*""filename""\s+""([^""]*)""",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
+    private static partial System.Text.RegularExpressions.Regex FilenameRegex();
 }

@@ -1,12 +1,21 @@
 using SourcePorter.Core.Domain;
 using SourcePorter.Core.Toolchain;
 using SourcePorter.Core.Validation;
+using SourcePorter.Core.Vmap;
 
 // Headless harness for porting + validating maps — used to test imports in bulk.
 //
-//   port     <cs2dir> <sourceMap.vmf|.bsp> <addon> [--no-bsp] [--no-unpack] [--compile] [--no-compile-assets] [--verbose]
+//   port     <cs2dir> <sourceMap.vmf|.bsp> <addon> [--no-bsp] [--no-unpack] [--compile] [--no-compile-assets] [--collapse-prefabs] [--skybox-template] [--repair] [--verbose]
 //   validate <cs2dir> <addon>
-//   batch    <cs2dir> <mapsDir> [--limit N] [--no-bsp] [--no-unpack] [--compile] [--no-compile-assets] [--verbose]
+//   batch    <cs2dir> <mapsDir> [--limit N] [--no-bsp] [--no-unpack] [--compile] [--no-compile-assets] [--collapse-prefabs] [--skybox-template] [--repair] [--verbose]
+//
+// --collapse-prefabs: after importing, merge the map's prefab/sub-map references into the
+// root .vmap (the sub-map files are kept). --skybox-template: scaffold a 3D-skybox setup
+// (a separate <map>_sky.vmap flagged skybox + a skybox_reference at 0 0 0). See PostImportVmapTools.
+//
+// --repair: after validating, re-import the materials/models the importer missed
+// (a model's gib/breakpiece children, a skybox material from a lighting prefab, …),
+// looping import→re-validate to a fixpoint. See MissingAssetImporter.
 //
 // Console output is compacted by default (one "Ported X" line per asset); pass
 // --verbose for the raw, unfiltered toolchain output.
@@ -28,9 +37,9 @@ try
 {
     return args[0].ToLowerInvariant() switch
     {
-        "port" => await Port(args[1], args[2], args[3], NoBsp(args), args.Contains("--compile"), CompileAssets(args), !NoUnpack(args), Threads(args), Compact(args)),
+        "port" => await Port(args[1], args[2], args[3], NoBsp(args), args.Contains("--compile"), CompileAssets(args), !NoUnpack(args), Threads(args), Compact(args), Repair(args), Collapse(args), Skybox(args)),
         "validate" => Validate(args[1], args[2]),
-        "batch" => await Batch(args[1], args[2], Limit(args), NoBsp(args), args.Contains("--compile"), CompileAssets(args), !NoUnpack(args), Threads(args), Compact(args)),
+        "batch" => await Batch(args[1], args[2], Limit(args), NoBsp(args), args.Contains("--compile"), CompileAssets(args), !NoUnpack(args), Threads(args), Compact(args), Repair(args), Collapse(args), Skybox(args)),
         _ => Fail($"unknown command '{args[0]}'"),
     };
 }
@@ -44,6 +53,9 @@ static bool NoBsp(string[] a) => a.Contains("--no-bsp");
 static bool NoUnpack(string[] a) => a.Contains("--no-unpack");
 static bool CompileAssets(string[] a) => !a.Contains("--no-compile-assets");
 static bool Compact(string[] a) => !a.Contains("--verbose");
+static bool Repair(string[] a) => a.Contains("--repair");
+static bool Collapse(string[] a) => a.Contains("--collapse-prefabs");
+static bool Skybox(string[] a) => a.Contains("--skybox-template");
 static int Limit(string[] a)
 {
     var i = Array.IndexOf(a, "--limit");
@@ -52,11 +64,11 @@ static int Limit(string[] a)
 static int Threads(string[] a)
 {
     var i = Array.IndexOf(a, "--threads");
-    return i >= 0 && i + 1 < a.Length && int.TryParse(a[i + 1], out var n) && n >= 1 ? n : 4;
+    return i >= 0 && i + 1 < a.Length && int.TryParse(a[i + 1], out var n) && n >= 1 ? n : Math.Max(1, Environment.ProcessorCount - 1);
 }
 static int Fail(string m) { Console.Error.WriteLine(m); return 2; }
 
-static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool noBsp, bool compile, bool compileAssets, bool unpack, int threads, bool compact)
+static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool noBsp, bool compile, bool compileAssets, bool unpack, int threads, bool compact, bool repair, bool collapse, bool skybox)
 {
     var cs2 = new Cs2Install(cs2Dir);
     if (!cs2.IsValid(out var err)) { Console.Error.WriteLine(err); return 1; }
@@ -67,23 +79,34 @@ static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool 
     var runner = new ProcessRunner();
 
     string vmf;
+    // Decompiled BSPs are flat (func_instances inlined), so there are no instances to merge
+    // and plain -usebsp can crash source1import's merge pass — use -usebsp_nomergeinstances for
+    // decompiled input. A loose .vmf keeps the default -usebsp (it may have real instances).
+    var noMerge = false;
     if (sourceMap.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase) && !noBsp)
     {
         var decompiler = new BspDecompiler(runner);
         decompiler.OnLog += Console.WriteLine;
         vmf = await MapStaging.StageBspAsync(decompiler, sourceMap, unpack);
+        noMerge = true;
     }
     else
     {
         vmf = MapStaging.StageVmf(sourceMap, Console.WriteLine);
     }
 
-    var project = cs2.BuildProject(vmf, addon, new ImportOptions { MaxParallelism = threads, CompileAssets = compileAssets, CompactLog = compact });
+    var project = cs2.BuildProject(vmf, addon, new ImportOptions { UseBsp = !noMerge, UseBspNoMergeInstances = noMerge, MaxParallelism = threads, CompileAssets = compileAssets, CompactLog = compact });
     var service = new MapImportService(cs2.Tools, runner, ResolveImportScriptsDir(cs2));
     service.OnLog += Console.WriteLine;
 
     Console.WriteLine($"=== IMPORT {project.MapName} -> {addon} ===");
     await service.ImportAsync(project);
+
+    // Opt-in post-import .vmap edits, before the compile so a --compile picks them up.
+    if (collapse)
+        PostImportVmapTools.CollapsePrefabs(cs2, addon, project.MapName, Console.WriteLine);
+    if (skybox)
+        PostImportVmapTools.CreateSkyboxTemplate(cs2, addon, project.MapName, Console.WriteLine);
 
     if (compile)
     {
@@ -94,14 +117,33 @@ static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool 
     foreach (var line in AddonStats.Collect(cs2.ContentAddonDir(addon), Path.Combine(cs2.GameDir, "csgo_addons", addon)).Format())
         Console.WriteLine(line);
 
-    return Validate(cs2Dir, addon);
+    var report = new AssetValidator(cs2, addon).Validate(Console.WriteLine);
+
+    // Optional remediation: re-import the materials/models the importer missed.
+    if (repair && report.MissingImportCount > 0)
+    {
+        var importer = new MissingAssetImporter(service, cs2);
+        importer.OnLog += Console.WriteLine;
+        var rr = await importer.RepairAsync(project, report);
+        Console.WriteLine($"=== REPAIR {addon}: imported {rr.ModelsImported} model(s)/{rr.MaterialsImported} material(s) " +
+                          $"in {rr.Rounds} round(s); resolved {rr.Resolved}/{rr.InitialMissing}, still missing {rr.StillMissing} ===");
+        report = rr.FinalReport;
+    }
+
+    PrintReport(addon, report);
+    return report.HasIssues ? 1 : 0;
 }
 
 static int Validate(string cs2Dir, string addon)
 {
     var cs2 = new Cs2Install(cs2Dir);
     var report = new AssetValidator(cs2, addon).Validate(Console.WriteLine);
+    PrintReport(addon, report);
+    return report.HasIssues ? 1 : 0;
+}
 
+static void PrintReport(string addon, ValidationReport report)
+{
     foreach (var issue in report.Issues.Take(40))
         Console.WriteLine($"  [{issue.Kind}] {issue.Source} -> {issue.Detail}");
     if (report.Issues.Count > 40)
@@ -112,10 +154,9 @@ static int Validate(string cs2Dir, string addon)
                       $"(mats={report.MissingImportMaterials} models={report.MissingImportModels}) " +
                       $"missingSources={report.MissingSourceCount} compiled={report.CompiledResourcesScanned} " +
                       $"missingCompiledDeps={report.MissingReferenceCount} readErrors={report.ErrorCount} ===");
-    return report.HasIssues ? 1 : 0;
 }
 
-static async Task<int> Batch(string cs2Dir, string mapsDir, int limit, bool noBsp, bool compile, bool compileAssets, bool unpack, int threads, bool compact)
+static async Task<int> Batch(string cs2Dir, string mapsDir, int limit, bool noBsp, bool compile, bool compileAssets, bool unpack, int threads, bool compact, bool repair, bool collapse, bool skybox)
 {
     var maps = Directory.EnumerateFiles(mapsDir, "*.vmf").Take(limit).ToList();
     Console.WriteLine($"Batch porting {maps.Count} map(s) from {mapsDir} (compile={compile}, compileAssets={compileAssets}, threads={threads})");
@@ -127,7 +168,7 @@ static async Task<int> Batch(string cs2Dir, string mapsDir, int limit, bool noBs
         var addon = $"{name}_test";
         try
         {
-            var code = await Port(cs2Dir, map, addon, noBsp, compile, compileAssets, unpack, threads, compact);
+            var code = await Port(cs2Dir, map, addon, noBsp, compile, compileAssets, unpack, threads, compact, repair, collapse, skybox);
             results.Add($"{name}: {(code == 0 ? "CLEAN" : "ISSUES")}");
         }
         catch (Exception ex)

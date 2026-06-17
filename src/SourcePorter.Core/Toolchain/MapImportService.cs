@@ -119,8 +119,12 @@ public sealed partial class MapImportService
             s1Content = ResolveSpaceFreeContentDir(s1Content);
 
         // --- import vmf -> vmap (built once with the ORIGINAL map name, reused for the re-import) ---
-        var importArgs = BuildMapImportArgs(project, s1Game, s1Content, addon, originalMapName);
-        await RunAsync(_tools.Source1Import, "source1import.exe", importArgs, env, ct);
+        // The -usebsp instance-merge pass can access-violate on some maps (after the .vmap is
+        // written but before the refs list) — RunMapImportAsync retries once without merging and
+        // returns the mode that worked, so the step-5 re-import below reuses it and doesn't recrash.
+        var bspMode = await RunMapImportAsync(
+            s1Game, s1Content, addon, originalMapName, InitialBspMode(project.Import), env, ct);
+        var importArgs = BuildMapImportArgs(s1Game, s1Content, addon, originalMapName, bspMode);
 
         // replace 'instance' paths with 'prefab'
         paths.SwitchInstancesToPrefabs();
@@ -201,6 +205,70 @@ public sealed partial class MapImportService
     }
 
     /// <summary>
+    /// Imports an explicit set of Source 1 models (<c>.mdl</c>) and materials (<c>.vmt</c>)
+    /// into the addon — the "repair" primitive <see cref="MissingAssetImporter"/> drives
+    /// when the validator finds dependencies the main import missed (a model's gib/breakpiece
+    /// children, a skybox material referenced only by a lighting prefab, …). It reuses the
+    /// exact dependency-phase passes: each model goes through <c>cs_mdl_import</c> (collecting
+    /// and importing its own materials, forcing <c>F_FORCE_UV2</c> on 2-UV ones), and the
+    /// standalone materials go through <c>source1import -usefilelist</c>. Honors
+    /// <see cref="ImportOptions.CompileAssets"/> and <see cref="ImportOptions.CompactLog"/>.
+    /// Per-asset failures are warnings (an asset with no S1 source simply stays missing),
+    /// never fatal.
+    /// </summary>
+    public async Task ImportSpecificAssetsAsync(
+        PortProject project,
+        IReadOnlyCollection<string> modelMdls,
+        IReadOnlyCollection<string> materialVmts,
+        CancellationToken ct = default)
+    {
+        if (modelMdls.Count == 0 && materialVmts.Count == 0)
+            return;
+
+        _maxParallelism = Math.Max(1, project.Import.MaxParallelism);
+        _compileAssets = project.Import.CompileAssets;
+        _compactor = project.Import.CompactLog ? new LogCompactor() : null;
+        try
+        {
+            var env = new Dictionary<string, string> { ["VALVE_NO_AUTO_P4"] = "1" };
+
+            using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures);
+            if (signatures.Applied)
+                Emit("Disabled vpk.signatures for this repair pass (guide -1.1); will restore afterwards.");
+
+            var paths = new ImportPaths(project.S2GameInfoDir, project.AddonName, project.MapName);
+            var mapsDir = Path.Combine(paths.S2ContentCsgoImported, "maps");
+            Directory.CreateDirectory(mapsDir);
+
+            // Models: a flat mdl list reused by the dependency-phase model importer (which
+            // also imports each model's materials and applies the 2-UV fix). The list name
+            // keeps the "mdl_lst" token that pass rewrites to "mtl_lst" for the material list.
+            if (modelMdls.Count > 0)
+            {
+                var mdlListPath = Path.Combine(mapsDir, "repair_mdl_lst.txt");
+                RefsFile.EnsureFileWritable(mdlListPath);
+                File.WriteAllLines(mdlListPath, modelMdls.Select(m => m.Replace('/', '\\')));
+                await ImportAndCompileMapMdlsAsync(mdlListPath, paths, project.S1GameInfoDir, project.AddonName, env, ct);
+            }
+
+            // Materials: wrapped in the importfilelist format and reused by the refs importer
+            // (the "_new_refs.txt" suffix is the token that pass rewrites for its compile list).
+            if (materialVmts.Count > 0)
+            {
+                var refsPath = Path.Combine(mapsDir, "repair_new_refs.txt");
+                RefsFile.EnsureFileWritable(refsPath);
+                File.WriteAllText(refsPath, RefsFile.RefsStringFromList(materialVmts));
+                await ImportAndCompileMapRefsAsync(refsPath, paths, project.S1GameInfoDir, project.AddonName, env, ct);
+            }
+        }
+        finally
+        {
+            FlushLog();
+            _compactor = null;
+        }
+    }
+
+    /// <summary>
     /// Compiles the imported main <c>.vmap</c> to <c>.vmap_c</c> via resourcecompiler
     /// so it can be validated/loaded. The Python importer leaves this to Hammer;
     /// we do it explicitly. Returns true on success (non-throwing).
@@ -237,11 +305,65 @@ public sealed partial class MapImportService
         }
     }
 
-    private static string BuildMapImportArgs(PortProject p, string s1Game, string s1Content, string addon, string mapName)
+    /// <summary>Which BSP-cleanup mode source1import runs the map import in.</summary>
+    internal enum BspMode { None, UseBsp, NoMerge }
+
+    /// <summary>Windows STATUS_ACCESS_VIOLATION (0xC0000005) as a signed process exit code.</summary>
+    internal const int AccessViolationExitCode = unchecked((int)0xC0000005);
+
+    internal static BspMode InitialBspMode(ImportOptions o) =>
+        o.UseBsp ? BspMode.UseBsp
+        : o.UseBspNoMergeInstances ? BspMode.NoMerge
+        : BspMode.None;
+
+    /// <summary>
+    /// True when a failed map import should be retried with instance-merging off.
+    /// source1import's <c>-usebsp</c> merge pass can access-violate after the <c>.vmap</c>
+    /// is written but before the refs list is; <c>-usebsp_nomergeinstances</c> skips that
+    /// pass (a flat/decompiled map has no instances to merge anyway). Only the merge mode is
+    /// worth retrying — <see cref="BspMode.NoMerge"/> has no safer fallback that keeps the
+    /// geometry, so its crashes stay fatal.
+    /// </summary>
+    internal static bool ShouldRetryWithoutMerge(BspMode mode, int exitCode) =>
+        mode == BspMode.UseBsp && exitCode == AccessViolationExitCode;
+
+    internal static string BuildMapImportArgs(string s1Game, string s1Content, string addon, string mapName, BspMode bsp)
     {
-        var bsp = p.Import.UseBsp ? "-usebsp" : "";
-        var noMerge = p.Import.UseBspNoMergeInstances ? " -usebsp_nomergeinstances" : "";
-        return $"-retail -nop4 -nop4sync {bsp}{noMerge} -src1gameinfodir \"{s1Game}\" -src1contentdir \"{s1Content}\" -s2addon \"{addon}\" -game csgo maps\\{mapName}.vmf";
+        var bspArg = bsp switch
+        {
+            BspMode.UseBsp => "-usebsp ",
+            BspMode.NoMerge => "-usebsp_nomergeinstances ",
+            _ => "",
+        };
+        return $"-retail -nop4 -nop4sync {bspArg}-src1gameinfodir \"{s1Game}\" -src1contentdir \"{s1Content}\" -s2addon \"{addon}\" -game csgo maps\\{mapName}.vmf";
+    }
+
+    /// <summary>
+    /// Runs the main map import, recovering from the known source1import <c>-usebsp</c>
+    /// crash: when merging is on and the tool dies with an access violation, retries once
+    /// with <c>-usebsp_nomergeinstances</c>. Returns the BSP mode that actually ran so the
+    /// later re-import reuses it; any other non-zero exit stays fatal (rethrown by RunAsync).
+    /// </summary>
+    private async Task<BspMode> RunMapImportAsync(
+        string s1Game, string s1Content, string addon, string mapName,
+        BspMode bspMode, IReadOnlyDictionary<string, string> env, CancellationToken ct)
+    {
+        try
+        {
+            await RunAsync(_tools.Source1Import, "source1import.exe",
+                BuildMapImportArgs(s1Game, s1Content, addon, mapName, bspMode), env, ct);
+            return bspMode;
+        }
+        catch (ImportToolException ex)
+            when (ShouldRetryWithoutMerge(bspMode, ex.ExitCode) && !ct.IsCancellationRequested)
+        {
+            Emit("source1import crashed (access violation) in the -usebsp instance-merge pass — a known " +
+                 "Valve tool crash. Retrying once with -usebsp_nomergeinstances (skips instance merging; " +
+                 "a flat/decompiled map has nothing to merge)…");
+            await RunAsync(_tools.Source1Import, "source1import.exe",
+                BuildMapImportArgs(s1Game, s1Content, addon, mapName, BspMode.NoMerge), env, ct);
+            return BspMode.NoMerge;
+        }
     }
 
     // ---- StripMDLsFromRefs ----
@@ -485,7 +607,7 @@ public sealed partial class MapImportService
             return;
 
         if (critical)
-            throw new ImportToolException($"Error running:\n>>>{display}\nAborting (exit {exitCode})");
+            throw new ImportToolException($"Error running:\n>>>{display}\nAborting (exit {exitCode})", exitCode);
 
         Emit($"WARNING: {Path.GetFileName(exe)} exited {exitCode} (continuing): {arguments}");
     }
@@ -495,4 +617,8 @@ public sealed partial class MapImportService
 }
 
 /// <summary>Thrown when a Valve tool exits non-zero (mirrors <c>utlc.Error</c>'s abort).</summary>
-public sealed class ImportToolException(string message) : Exception(message);
+public sealed class ImportToolException(string message, int exitCode = 0) : Exception(message)
+{
+    /// <summary>The failing tool's process exit code (0 when not supplied).</summary>
+    public int ExitCode { get; } = exitCode;
+}

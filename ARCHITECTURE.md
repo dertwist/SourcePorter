@@ -15,6 +15,7 @@ for the build order, see [ROADMAP.md](ROADMAP.md).
 | UI                 | **WinForms** (`net9.0-windows`)     | Lets us mirror the Source 2 Viewer (ValveResourceFormat GUI) dark theme 1:1; the orchestrated tools are Windows-only anyway. |
 | VPK reading        | **ValvePak** 4.0.0.142 (NuGet)      | Reads CS2 `.vpk` archives to resolve whether referenced files exist. |
 | KeyValues reading  | **ValveKeyValue** 0.20.0.417 (NuGet)| Reads KV1/KV3 config files (`gameinfo.gi`, `addoninfo.txt`). |
+| `.vmap` Datamodel  | **KeyValues2** 0.8.0 (NuGet)        | Reads/writes the uncompiled `.vmap` DMX graph for the post-import `Vmap/` tools (the same serializer VRF uses). |
 | Tests              | **xUnit**                           | Standard, fast, good CLI story. |
 | Platform           | **Windows 10/11 x64**               | `source1import.exe`, `resourcecompiler.exe`, `cs_mdl_import.exe`, `vbsp.exe`, `vpk.exe` are all Win64. |
 
@@ -30,6 +31,10 @@ last net8.0 build) and **ValvePak 4.0.0.142**. When the .NET 10 SDK is available
 bump these together with the `TargetFramework`. See
 [`SourcePorter.Core.csproj`](src/SourcePorter.Core/SourcePorter.Core.csproj).
 
+**KeyValues2** 0.8.0 (the `.vmap` Datamodel reader/writer) is **not** affected by
+that constraint: 0.8.0 targets **net9.0**, so it works on the current TFM without
+the net10 SDK.
+
 ---
 
 ## 2. Solution layout
@@ -44,8 +49,12 @@ SourcePorter.sln
 │  │  │                         plus the bundled-BSPSource .bsp→.vmf bridge.
 │  │  │                         (ProcessRunner, ValveToolLocator, RefsFile,
 │  │  │                          ImportPaths, MapImportService, BspDecompiler)
-│  │  └─ Validation/            Asset validator: missing-file / read-error checks.
-│  │                            (Source2Resource, VpkIndex, GameInfo, AssetValidator)
+│  │  ├─ Validation/            Asset validator: missing-file / read-error checks.
+│  │  │                         (Source2Resource, VpkIndex, GameInfo, AssetValidator)
+│  │  └─ Vmap/                   Post-import .vmap (DMX/KV3) tools via KeyValues2:
+│  │                            collapse prefabs + skybox template.
+│  │                            (VmapDocument, VmapPrefabCollapser, VmapSkyboxTemplate,
+│  │                             VmapBackup, PostImportVmapTools)
 │  └─ SourcePorter.App/         WinForms front-end.
 │     ├─ Program.cs             Entry point + theme init.
 │     ├─ MainForm.cs            Importer shell: inputs + console + menu.
@@ -144,6 +153,18 @@ match the Python.
   that dir ([`ShortPath`](src/SourcePorter.Core/Toolchain/ShortPath.cs), Win32
   `GetShortPathName`) so the path survives intact down to `vbsp`. If no 8.3 name exists
   (disabled on the volume) it warns instead of silently producing flat terrain.
+- **`-usebsp` instance-merge crash recovery.** On some maps `source1import`'s `-usebsp`
+  pass **access-violates** (`0xC0000005`, exit `-1073741819`) *after* the `.vmap` is
+  written but *before* the refs list — its instance-merge step crashes, so the dependency
+  import would find no refs. `RunMapImportAsync` detects that specific exit code
+  (`ImportToolException.ExitCode`, via `ShouldRetryWithoutMerge`) and retries the import
+  once with `-usebsp_nomergeinstances`, then reuses that mode for the step-5 re-import so
+  it doesn't recrash. A flat/decompiled map (every `func_instance` inlined by BSPSource)
+  has nothing to merge, so nothing is lost. Proactively, the GUI and CLI already route
+  **decompiled-BSP** input to `-usebsp_nomergeinstances` up front, so the common case never
+  hits the crash; the retry is the safety net for any other map that trips it. (Only the
+  merge mode is retried — plain `-usebsp_nomergeinstances`/no-bsp crashes stay fatal, as
+  there is no safer fallback that preserves the geometry.)
 - **Console compaction ([`LogCompactor`](src/SourcePorter.Core/Toolchain/LogCompactor.cs),
   `ImportOptions.CompactLog`, default on).** The toolchain emits a whole block per asset
   (a VTF property dump, several `+- Wrote file …tga` lines, `ProcessTexture` notices,
@@ -162,14 +183,17 @@ match the Python.
   patching still runs so a later compile is correct, and the second `source1import`
   re-run still runs (it picks up the *imported* material sources). This is finer
   than `SkipDeps` (which skips importing deps entirely) and orthogonal to the
-  main-map `CompileMapAsync` (the separate "Compile map" option). Exposed as the
-  GUI **Compile Assets** checkbox and CLI `--no-compile-assets` (CLI defaults it
-  *on* so its automatic validation has `_c` files to check).
+  main-map `CompileMapAsync` (CLI-only `--compile`; the GUI has no map-compile
+  toggle). Exposed as the GUI **Compile Assets** checkbox and CLI
+  `--no-compile-assets` (CLI defaults it *on* so its automatic validation has
+  `_c` files to check).
 - **Concurrency:** the dependency phase runs model import (`cs_mdl_import`) and
   material compile (`resourcecompiler`) in parallel via `Parallel.ForEachAsync`,
-  bounded by `ImportOptions.MaxParallelism` (default 4; 1 = sequential). The 2-UV
-  model-compile pass stays sequential — it mutates the shared 2-UV list and shared
-  `.vmat` files. Exposed as CLI `--threads N` and a GUI Threads spinner.
+  bounded by `ImportOptions.MaxParallelism` (default: all logical processors minus
+  one, min 1; 1 = sequential). The 2-UV model-compile pass stays sequential — it
+  mutates the shared 2-UV list and shared `.vmat` files. Tunable via the CLI
+  `--threads N` flag (same cores-minus-one default); the GUI has no thread control
+  and always uses the default.
 - [`BspDecompiler`](src/SourcePorter.Core/Toolchain/BspDecompiler.cs) — the
   `.bsp` bridge. Valve ships no Source 1 decompiler, so when the input is a
   `.bsp` the GUI/CLI first decompile it to a `.vmf` (via the bundled BSPSource)
@@ -201,6 +225,18 @@ match the Python.
   already has the subkeys, so it's a no-op there. Applied to the temp/decompiled copy
   only, never the user's original. (Verified on a real decompiled map: 181/181
   displacements repaired.)
+  `EnsureNoUnresolvableColorCorrection` is the third fix-up: a decompiled map keeps its
+  `color_correction` entity pointing at a Source 1 lookup `.raw`
+  (e.g. `materials/correction/cc_coastal.raw`) that BSPSource does **not** unpack, and
+  `source1import` **access-violates** (*"RelativePathToFullPath failed"*, exit
+  `-1073741819`) when it tries to import that missing file — after the `.vmap` is written
+  but before the refs list, so the entire dependency import is lost. It removes only the
+  `color_correction` entities whose `.raw` is absent from the (unpacked) content root;
+  one whose file *is* present is left untouched, so color correction survives when
+  BSPSource did unpack it. Run from `BspDecompiler` against the unpack dir (it needs the
+  content root, unlike the other two text-only fix-ups). (Verified end-to-end on a real
+  decompiled map: with the unresolvable `color_correction` stripped, the map imports and
+  writes its refs instead of crashing.)
 - [`MapStaging`](src/SourcePorter.Core/Toolchain/MapStaging.cs) — the source-map
   stager shared by the GUI and CLI. `source1import` requires the map at
   `<contentdir>\maps\<name>.vmf` (it derives the content dir + map name by
@@ -271,11 +307,13 @@ upstream `bspsrc-windows.zip` build input is git-ignored. To refresh BSPSource, 
 
 ---
 
-> **Sections 5, 6, and 8 describe planned modules beyond the importer** (the
-> guide's pre/post-import fix-ups and packaging). They are on the roadmap and not
-> yet built. **Section 7 (asset validation) IS implemented.**
+> **Sections 6 and 8 describe planned modules beyond the importer** (the guide's
+> entity remapping and packaging). They are on the roadmap and not yet built.
+> **Section 7 (asset validation) IS implemented**, and **§5's `Vmap/` post-import
+> tools (collapse prefabs, skybox template) ARE implemented** — the remaining §5
+> entity/PostImport fix-ups are not.
 
-## 5. File formats *(planned)*
+## 5. File formats *(partially implemented)*
 
 ### Source 1 `.vmf` (`Vmf/`)
 
@@ -284,14 +322,37 @@ purpose-built reader/writer — we only need entity/output/side traversal and
 faithful round-tripping, not a full editor. Pre-import analysis and stripper
 application operate on this tree. Round-tripping must preserve unknown keys.
 
-### Source 2 `.vmap` (`Vmap/`)
+### Source 2 `.vmap` (`Vmap/`) — partially implemented
 
-The uncompiled `.vmap` (in `content/`) is **KeyValues3 (KV3)**. We use
-ValveResourceFormat's KV3 reader/writer to load the entity lump, apply
-PostImport/Entities fix-ups (remove `(null)` params, rewrite classnames, add
-outputs, delete origin meshes), and write it back. Compiled `.vmap_c`/`.vpk`
-artifacts are read-only inputs for the asset audit (e.g. inspecting
-`maps/lightmaps/irradiance.vtex_c`, comparing against base CS2 assets).
+The uncompiled `.vmap` (in `content/`) is a **Datamodel/DMX graph** (the imported
+main map is text KeyValues2; its sub-maps are binary DMX). We read and write it via
+the **KeyValues2** package (`Datamodel.Load`/`Save` — the same serializer VRF uses),
+operating on the generic `Datamodel.Element` graph rather than porting VRF's typed
+`CMap*` classes. [`VmapDocument`](src/SourcePorter.Core/Vmap/VmapDocument.cs) wraps a
+loaded map (its `world` element + `children` node array) and re-saves preserving the
+file's original encoding+version so CS2/Hammer still read it.
+
+Two **post-import tools** run automatically after an import when their checkbox/flag
+is set (orchestrated by the GUI/CLI like the validator, via the
+[`PostImportVmapTools`](src/SourcePorter.Core/Vmap/PostImportVmapTools.cs) façade):
+
+- [`VmapPrefabCollapser`](src/SourcePorter.Core/Vmap/VmapPrefabCollapser.cs) —
+  **Collapse prefabs**: merges the map's prefab/sub-map references (the auto-split
+  gameplay / environment / lighting / cubemap `.vmap`s, and any `CMapPrefab` node)
+  into the root map's world via the library's cross-document `ImportElement`, then
+  removes the reference. The sub-map files are **kept on disk** (just unreferenced).
+- [`VmapSkyboxTemplate`](src/SourcePorter.Core/Vmap/VmapSkyboxTemplate.cs) —
+  **Skybox template**: scaffolds the Source 2 3D-skybox setup — an empty
+  `<map>_sky.vmap` flagged as a skybox (`mapUsageType = "skybox"`) plus a
+  `skybox_reference` entity at `0 0 0` in the main map pointing at it via
+  `targetmapname`. Idempotent (won't clobber an existing `_sky.vmap` or add a second
+  reference). The user fills the sky geometry in Hammer.
+
+Both back up the main `.vmap` before overwriting it (`VmapBackup`, §11).
+
+**Still planned** here: the guide's entity/PostImport fix-ups (remove `(null)`
+params, rewrite classnames, add outputs, delete origin meshes — see §6). Compiled
+`.vmap_c`/`.vpk` artifacts remain read-only inputs for the asset audit.
 
 ---
 
@@ -366,13 +427,40 @@ How it works (informed by studying VRF under `reference/`):
 - [`AssetValidator`](src/SourcePorter.Core/Validation/AssetValidator.cs) — runs the
   content-reference pass and the secondary compiled-RERL pass, reporting
   `MissingPrefab` / `MissingImport` / `MissingSource` / `MissingReference` / `ReadError`
-  in a `ValidationReport`.
+  in a `ValidationReport`. Each reference issue carries the bare asset path
+  (`AssetIssue.ReferencePath`) so a remediation pass can act on it without re-parsing
+  the human-readable detail. **Detection only — it never touches the toolchain.**
 - [`AddonStats`](src/SourcePorter.Core/Validation/AddonStats.cs) — not validation, but
   shown alongside it: walks the content + compiled trees and reports the addon size and
   `.vmat` / `.vmdl` / `.vmap` / texture / `_c` counts at the end of an import.
 
 Verified end-to-end on real addons (e.g. a clean addon: 11 base archives
 mounted, 15 resources, 43 references, 0 missing).
+
+### 7a. Repairing missed imports (`MissingAssetImporter`)
+
+Validation regularly finds `MissingImport` materials/models that are **transitive
+dependencies** the main import never enumerated: a model's gib/breakpiece children
+(`styrofoam_cups_p1.vmdl`, `table_picnic_break01.vmdl`, …) referenced *inside* the
+parent `.vmdl`, or a skybox material referenced only by a lighting prefab. These are
+stock CS:GO assets — their Source 1 sources exist — so they *can* be re-imported.
+
+[`MissingAssetImporter`](src/SourcePorter.Core/Toolchain/MissingAssetImporter.cs) is
+the **separate remediation step** (kept out of `AssetValidator`, which stays
+detect-only and toolchain-free). It maps each missing `.vmdl`/`.vmat` back to its
+Source 1 `.mdl`/`.vmt` (`PlanFromReport`, pure/unit-tested), drives
+[`MapImportService.ImportSpecificAssetsAsync`](src/SourcePorter.Core/Toolchain/MapImportService.cs)
+— which reuses the dependency-phase model/material passes (`cs_mdl_import`, the
+material filelist `source1import`, the `F_FORCE_UV2` 2-UV fix, optional
+`resourcecompiler` per `ImportOptions.CompileAssets`) — then **re-validates and loops
+to a fixpoint**, because a freshly-imported model can reveal its own missing children.
+An `attempted` set ensures each source is tried once (an asset with no S1 source stays
+missing and is reported honestly, never faked); that also bounds the loop, with a
+`maxRounds` cap as backstop. It is a **manual, on-demand step**, not part of the import:
+the GUI exposes it under **Tools → Import missing assets** (validates the current
+CS2 directory + output addon, then repairs any `MissingImport` issues), and the CLI as
+the `--repair` flag (which runs after the post-import validation). It never runs
+automatically as part of an import.
 
 **Planned extensions:** dedupe vs base CS2 (Overridden/Read-Only, §2.4), 2-UV
 `F_FORCE_UV2` checks, foliage wind-sway flags, and parsing
@@ -399,15 +487,16 @@ WinForms with a deliberately thin code-behind. The shell
 ([`MainForm`](src/SourcePorter.App/MainForm.cs)) is a single importer screen:
 
 - a **menu** (`File`, `Tools`, `Help`) — themed with `DarkToolStripRenderer` —
-  with the **Configs Editor** window under `Tools` and the **Reference** window
-  under `Help`; asset validation (§7) is no longer a menu action — it runs
-  automatically after each import (always, since the model-source pass works
-  without any compiled `_c` files), followed by the **addon statistics** summary
-  (size + `.vmat`/`.vmdl`/`.vmap`/texture counts);
+  with **Import missing assets** (§7a) and the **Configs Editor** window under
+  `Tools`, and the **Reference** window under `Help`; asset validation (§7) is no
+  longer a menu action — it runs automatically after each import (always, since the
+  model-source pass works without any compiled `_c` files), followed by the **addon
+  statistics** summary (size + `.vmat`/`.vmdl`/`.vmap`/texture counts);
 - an **input form** (top): **CS2 Directory**, **Source Map** (`.vmf`), **Output
-  Addon**, the BSP / skip-deps / **Compile Assets** / Compile-map / **Compact log**
-  option checkboxes (with the importer's mutual-exclusion), and **Import** /
-  **Cancel** buttons;
+  Addon**, the BSP / skip-deps / **Compile Assets** / **Compact log** option
+  checkboxes (with the importer's mutual-exclusion), and **Import** / **Cancel**
+  buttons (the dependency phase always uses all logical processors minus one — there
+  is no GUI thread control);
 - a **dark console** (fill) the import output streams into;
 - a **status bar**.
 
@@ -480,7 +569,8 @@ rendered exactly as upstream does:
 ## 10. Settings & persistence
 
 [`AppSettings`](src/SourcePorter.App/AppSettings.cs) persists the GUI inputs
-(CS2 directory, source map, output addon, the three import options) to
+(CS2 directory, source map, output addon, the import-option checkboxes, and the
+thread count) to
 `%APPDATA%\SourcePorter\settings.json` — the SourcePorter equivalent of Valve's
 `import_map_community_gui_cfg.json`. Loaded on start; saved on field/option
 change, on browse, before each import, **and** on close — so it survives even if

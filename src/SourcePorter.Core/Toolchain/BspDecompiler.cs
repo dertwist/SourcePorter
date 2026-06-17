@@ -58,9 +58,6 @@ public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation =
             throw new InvalidOperationException(
                 $"BSPSource did not produce {outputVmfPath} — see the log above for the cause.");
 
-        VmfNormalizer.EnsureImportableHeader(outputVmfPath, m => OnLog?.Invoke(m));
-        VmfNormalizer.EnsureDisplacementOffsets(outputVmfPath, m => OnLog?.Invoke(m));
-
         // BSPSource unpacks embedded files into a sibling dir named after the output
         // .vmf (e.g. `<out-dir>\<map>\materials\…`), which is itself a content root.
         string? unpackDir = null;
@@ -74,6 +71,14 @@ public sealed class BspDecompiler(ProcessRunner runner, string? bspsrcLocation =
             else
                 OnLog?.Invoke("No embedded files unpacked (map packs no custom content).");
         }
+
+        VmfNormalizer.EnsureImportableHeader(outputVmfPath, m => OnLog?.Invoke(m));
+        VmfNormalizer.EnsureDisplacementOffsets(outputVmfPath, m => OnLog?.Invoke(m));
+        // The content root source1import will read materials from is the unpack dir (or, when
+        // nothing was unpacked, the .vmf's own dir). Strip color_correction entities whose .raw
+        // isn't there — source1import access-violates on an unresolvable color-correction file.
+        VmfNormalizer.EnsureNoUnresolvableColorCorrection(
+            outputVmfPath, unpackDir ?? Path.GetDirectoryName(outputVmfPath)!, m => OnLog?.Invoke(m));
 
         return new BspDecompileResult(outputVmfPath, unpackDir);
     }
