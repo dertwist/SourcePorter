@@ -50,10 +50,22 @@ public static class PostImportVmapTools
     /// dimensions source1import couldn't.
     /// </summary>
     public static VmapBrushUvFixer.Result FixBrushUvScale(
-        Cs2Install cs2, string addon, string? stagedContentRoot, Action<string>? log = null, CancellationToken ct = default)
+        Cs2Install cs2, string addon, string mapName, string? stagedContentRoot,
+        Action<string>? log = null, CancellationToken ct = default)
     {
         var mapsDir = Path.Combine(cs2.ContentAddonDir(addon), "maps");
-        return VmapBrushUvFixer.FixAddon(mapsDir, stagedContentRoot, log, ct);
+        return VmapBrushUvFixer.FixAddon(mapsDir, mapName, stagedContentRoot, log, ct);
+    }
+
+    /// <summary>
+    /// Removes redundant single-child / empty <c>CMapGroup</c> wrappers across the addon's maps
+    /// (main + prefab sub-maps) to shrink the <c>.vmap</c> (see <see cref="VmapGroupFlattener"/>).
+    /// </summary>
+    public static VmapGroupFlattener.Result FlattenSingleChildGroups(
+        Cs2Install cs2, string addon, Action<string>? log = null, CancellationToken ct = default)
+    {
+        var mapsDir = Path.Combine(cs2.ContentAddonDir(addon), "maps");
+        return VmapGroupFlattener.FlattenAddon(mapsDir, log, ct);
     }
 
     /// <summary>Scaffolds the 3D-skybox template for the map (see <see cref="VmapSkyboxTemplate"/>).</summary>

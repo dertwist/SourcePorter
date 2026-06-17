@@ -42,13 +42,17 @@ public static class VmapBrushUvFixer
     }
 
     /// <summary>
-    /// Fixes every <c>.vmap</c> under <paramref name="addonContentMapsDir"/> (the main map and its
-    /// prefab sub-maps), reading real texture dimensions from <paramref name="stagedContentRoot"/>.
-    /// Each changed file is backed up first. No-op (and harmless) when the staged content is gone or
-    /// a map has no custom-material faces.
+    /// Fixes the imported map <paramref name="mapName"/>'s own <c>.vmap</c>s under
+    /// <paramref name="addonContentMapsDir"/> — the main <c>&lt;map&gt;.vmap</c> and its
+    /// <c>prefabs/&lt;map&gt;/</c> sub-maps only — reading real texture dimensions from
+    /// <paramref name="stagedContentRoot"/>. It is deliberately scoped to those files: the rescale
+    /// is NOT idempotent, so it must never touch unrelated <c>.vmap</c>s a user may have placed in
+    /// the maps dir (e.g. hand-saved copies), or it would double-apply the correction. Each changed
+    /// file is backed up first. No-op when the staged content is gone or the map has no
+    /// custom-material faces.
     /// </summary>
     public static Result FixAddon(
-        string addonContentMapsDir, string? stagedContentRoot,
+        string addonContentMapsDir, string mapName, string? stagedContentRoot,
         Action<string>? log = null, CancellationToken ct = default)
     {
         log?.Invoke("▶ Brush UV fix: correcting custom-material texture scale…");
@@ -66,7 +70,7 @@ public static class VmapBrushUvFixer
         var dimCache = new Dictionary<string, (float W, float H)?>(StringComparer.OrdinalIgnoreCase);
         int filesChanged = 0, facesFixed = 0, materialsFixed = 0;
 
-        foreach (var vmap in Directory.EnumerateFiles(addonContentMapsDir, "*.vmap", SearchOption.AllDirectories))
+        foreach (var vmap in MapVmaps(addonContentMapsDir, mapName))
         {
             ct.ThrowIfCancellationRequested();
 
@@ -106,6 +110,36 @@ public static class VmapBrushUvFixer
         else
             log?.Invoke($"  Brush UV fix complete: {facesFixed} face(s) in {filesChanged} file(s).");
         return new Result(filesChanged, facesFixed, materialsFixed);
+    }
+
+    /// <summary>The imported map's own <c>.vmap</c>s: the main <c>&lt;map&gt;.vmap</c> plus every
+    /// <c>.vmap</c> under <c>prefabs/&lt;map&gt;/</c> (the auto-split gameplay/environment/lighting/
+    /// cubemap sub-maps). Excludes any unrelated <c>.vmap</c> a user dropped in the maps dir.</summary>
+    internal static IEnumerable<string> MapVmaps(string mapsDir, string mapName)
+    {
+        var main = Path.Combine(mapsDir, mapName + ".vmap");
+        if (File.Exists(main))
+            yield return main;
+
+        var prefabDir = Path.Combine(mapsDir, "prefabs", mapName);
+        if (Directory.Exists(prefabDir))
+            foreach (var f in Directory.EnumerateFiles(prefabDir, "*.vmap", SearchOption.AllDirectories))
+                yield return f;
+    }
+
+    /// <summary>
+    /// The Source 2 brush-face UV formula (matches Hammer): for a vertex world position
+    /// <paramref name="p"/>, the per-face texture axes (xyz direction + w offset) and the corrected
+    /// per-axis <c>textureScale</c>, the baked texcoord is
+    /// <c>u = (dot(P, axisU.xyz)/scaleU + axisU.w) / textureWidth</c> (and likewise for v).
+    /// Confirmed bit-for-bit against a Hammer-corrected <c>.vmap</c>.
+    /// </summary>
+    internal static Vector2 RecomputeTexcoord(
+        Vector3 p, Vector4 axisU, Vector4 axisV, float scaleU, float scaleV, float dimW, float dimH)
+    {
+        var u = (Vector3.Dot(p, new Vector3(axisU.X, axisU.Y, axisU.Z)) / scaleU + axisU.W) / dimW;
+        var v = (Vector3.Dot(p, new Vector3(axisV.X, axisV.Y, axisV.Z)) / scaleV + axisV.W) / dimH;
+        return new Vector2(u, v);
     }
 
     private static string MarkerPath(string vmap) => vmap + ".spuvfix";
@@ -208,8 +242,6 @@ public static class VmapBrushUvFixer
             //    on-screen scale; scaling the old (16-default) texcoords could not reproduce it.
             var au = axisU[f];
             var av = axisV[f];
-            var auDir = new Vector3(au.X, au.Y, au.Z);
-            var avDir = new Vector3(av.X, av.Y, av.Z);
 
             var e0 = faceEdge[f];
             var e = e0;
@@ -221,12 +253,7 @@ public static class VmapBrushUvFixer
                 var vi = edgeVtx[e];
                 if (fv >= 0 && fv < texcoord.Count && vi >= 0 && vi < positions.Count
                     && sx != 0f && sy != 0f)
-                {
-                    var p = positions[vi];
-                    var u = (Vector3.Dot(p, auDir) / sx + au.W) / dim.W;
-                    var v = (Vector3.Dot(p, avDir) / sy + av.W) / dim.H;
-                    texcoord[fv] = new Vector2(u, v);
-                }
+                    texcoord[fv] = RecomputeTexcoord(positions[vi], au, av, sx, sy, dim.W, dim.H);
                 e = e < edgeNext.Count ? edgeNext[e] : e0;
             } while (e != e0 && ++guard < 256);
 

@@ -52,9 +52,9 @@ SourcePorter.sln
 │  │  ├─ Validation/            Asset validator: missing-file / read-error checks.
 │  │  │                         (Source2Resource, VpkIndex, GameInfo, AssetValidator)
 │  │  ├─ Vmap/                   Post-import .vmap (DMX/KV3) tools via KeyValues2:
-│  │  │                         collapse prefabs + skybox template.
-│  │  │                         (VmapDocument, VmapPrefabCollapser, VmapSkyboxTemplate,
-│  │  │                          VmapBackup, PostImportVmapTools)
+│  │  │                         collapse prefabs + flatten single-child groups + skybox template.
+│  │  │                         (VmapDocument, VmapPrefabCollapser, VmapGroupFlattener,
+│  │  │                          VmapSkyboxTemplate, VmapBackup, PostImportVmapTools)
 │  │  └─ Materials/              Non-binary VMT→VMAT converter (port of kristiker/
 │  │                            source1import) + a VTF header reader for texture
 │  │                            dimensions. (VmtFile, VmtToVmatConverter, VmatDocument,
@@ -330,9 +330,24 @@ these files in place.
 
 - ✅ Set `VALVE_NO_AUTO_P4=1` (the script's `SaveEnv`/`RestoreEnv`) so the P4
   libs run disconnected.
-- ⬜ *(planned)* **`vpk.signatures` workaround** (guide §-1.1): detect the
-  CS:GO `.vpk` read failure and offer to rename `game/bin/win64/vpk.signatures`
-  (and undo it).
+- ✅ **`vpk.signatures` workaround** (guide §-1.1,
+  [`VpkSignaturesGuard`](src/SourcePorter.Core/Toolchain/VpkSignaturesGuard.cs)).
+  Since a Dec-2023 update `source1import` can't read the CS:GO `pak01.vpk` while
+  `game/bin/win64/vpk.signatures` is present, so each import/repair/compile pass
+  temporarily renames it (to `.disabled`) and restores it on dispose — the install
+  is left pristine. The constructor is **non-throwing**: if the file is held open by
+  another process (CS2 / the Source 2 tools running) the rename can't happen, so the
+  guard records `VpkSignaturesState.Locked` rather than aborting the import with a
+  cryptic "the process cannot access the file because it is being used by another
+  process" message — the caller warns (close CS2, re-import) and continues, letting
+  `source1import` surface its own `pak01.vpk` error if the workaround was truly needed.
+  **Restoration is VAC-critical** (CS2 rejects the install — players can't connect —
+  while `vpk.signatures` is missing), so it is hardened three ways: a rename (not a
+  regenerate) brings the byte-for-byte original back on dispose; the constructor and the
+  app's startup both call `RestoreLeftover` to recover a file stranded by a previous
+  killed/crashed run; and a restore that can't complete right now (file re-locked) is
+  reported as a **CRITICAL** console warning with manual-rename instructions rather than
+  silently leaving the install broken.
 - ⬜ *(planned)* Detect the **fatal missing-material** condition (§-1.2) by
   checking `ErrorMaterialIsFatalError` in `gameinfo.gi` before a run.
 
@@ -388,15 +403,32 @@ operating on the generic `Datamodel.Element` graph rather than porting VRF's typ
 loaded map (its `world` element + `children` node array) and re-saves preserving the
 file's original encoding+version so CS2/Hammer still read it.
 
-Two **post-import tools** run automatically after an import when their checkbox/flag
-is set (orchestrated by the GUI/CLI like the validator, via the
-[`PostImportVmapTools`](src/SourcePorter.Core/Vmap/PostImportVmapTools.cs) façade):
+Two **checkbox/flag-driven post-import tools** run after an import — **Collapse prefabs** and
+**Skybox template** — orchestrated by the GUI/CLI like the validator, via the
+[`PostImportVmapTools`](src/SourcePorter.Core/Vmap/PostImportVmapTools.cs) façade. A third,
+**VmapGroupFlattener**, has no toggle of its own: it runs automatically as the second half of
+**Collapse prefabs**.
 
 - [`VmapPrefabCollapser`](src/SourcePorter.Core/Vmap/VmapPrefabCollapser.cs) —
   **Collapse prefabs**: merges the map's prefab/sub-map references (the auto-split
   gameplay / environment / lighting / cubemap `.vmap`s, and any `CMapPrefab` node)
   into the root map's world via the library's cross-document `ImportElement`, then
   removes the reference. The sub-map files are **kept on disk** (just unreferenced).
+- [`VmapGroupFlattener`](src/SourcePorter.Core/Vmap/VmapGroupFlattener.cs) —
+  **Flatten single-child groups**: `source1import` (and the decompile path) leave behind a
+  lot of `CMapGroup` wrappers that contain a **single** object — pure overhead, since every
+  group is a full Datamodel element (own id/node-id/editor attrs), so thousands of one-child
+  wrappers bloat the `.vmap`. It walks every `.vmap` in the addon (main + prefab sub-maps),
+  **bottom-up**, replacing each one-child `CMapGroup` with its lone child (so `group → group →
+  mesh` reduces to `mesh`) and dropping empty groups; the orphaned group elements then fall
+  out of the serialized file, shrinking it. **Safety:** a `CMapGroup` is a transform node
+  (children in its local space), so only groups with an **identity** transform are collapsed —
+  exactly the importer's organisational wrappers; any group the user actually moved/rotated/
+  scaled is left alone. `CMapInstance` target groups and structural subclasses like
+  `CMapWorldLayer` are never touched, and the pass is idempotent. Backs up each changed file
+  first (`VmapBackup`). **No separate toggle** — it runs automatically as the second half of
+  **Collapse prefabs** (GUI checkbox / CLI `--collapse-prefabs`), since collapsing merges sub-map
+  nodes into the root, which is exactly where one-child wrappers accumulate.
 - [`VmapSkyboxTemplate`](src/SourcePorter.Core/Vmap/VmapSkyboxTemplate.cs) —
   **Skybox template**: scaffolds the Source 2 3D-skybox setup — an empty
   `<map>_sky.vmap` flagged as a skybox (`mapUsageType = "skybox"`) plus a
@@ -404,14 +436,16 @@ is set (orchestrated by the GUI/CLI like the validator, via the
   `targetmapname`. Idempotent (won't clobber an existing `_sky.vmap` or add a second
   reference). The user fills the sky geometry in Hammer.
 
-Both back up the main `.vmap` before overwriting it (`VmapBackup`, §11).
+All three back up each `.vmap` before overwriting it (`VmapBackup`, §11).
 
 A third tool runs **automatically after a BSP import** (not a checkbox — it's a correctness fix,
 like validation):
 
 - [`VmapBrushUvFixer`](src/SourcePorter.Core/Vmap/VmapBrushUvFixer.cs) — **Brush UV scale fix**:
-  walks every `.vmap` in the addon (main + prefab sub-maps) and corrects the UV mapping of brush
-  faces whose material source1import couldn't read. Those `CDmePolygonMesh` faces are baked at a
+  corrects the UV mapping of brush faces whose material source1import couldn't read, across the
+  imported map's **own** `.vmap`s only — the main `<map>.vmap` and its `prefabs/<map>/` sub-maps
+  (`MapVmaps`). It is deliberately *not* a `*.vmap` sweep of the maps dir: the rescale isn't
+  idempotent, so touching an unrelated `.vmap` a user hand-saved there would double-apply it. Those `CDmePolygonMesh` faces are baked at a
   fixed **16×16** texture size (source1import's fallback when `GetMappingDimensionsForVMT` fails),
   so the fixer reads the real `.vtf` dimensions from the staged content (`VmtFile` → `$basetexture`
   → `VtfHeader`) and, per face: (1) corrects `textureScale` back to the true S1 scale (× `realDim/16`),

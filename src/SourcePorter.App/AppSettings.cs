@@ -28,7 +28,8 @@ public sealed class AppSettings
     /// <summary>Unpack a .bsp's embedded materials/models when decompiling it.</summary>
     public bool UnpackEmbedded { get; set; } = true;
 
-    /// <summary>Post-import: merge the map's prefab/sub-map references into the root .vmap (off by default).</summary>
+    /// <summary>Post-import: merge the map's prefab/sub-map references into the root .vmap, then
+    /// flatten the redundant single-child group wrappers it leaves behind (off by default).</summary>
     public bool CollapsePrefabs { get; set; }
 
     /// <summary>Post-import: scaffold a 3D-skybox template (separate _sky.vmap + skybox_reference) (off by default).</summary>

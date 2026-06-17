@@ -70,6 +70,32 @@ public sealed class MainForm : Form
         AppendConsole("Set the CS2 directory and a source .vmf, then press Import.", Themer.CurrentThemeColors.ContrastSoft);
 
         TryAutoDetectCs2Directory();
+        RecoverVpkSignatures();
+    }
+
+    /// <summary>
+    /// VAC safety net: if a previous import was killed/crashed before it could restore
+    /// <c>vpk.signatures</c> (renamed to <c>.disabled</c> for the §-1.1 workaround), put it
+    /// back now — CS2/VAC rejects the install while it is missing. Best-effort and never
+    /// blocks startup; the import path also recovers it before each run.
+    /// </summary>
+    private void RecoverVpkSignatures()
+    {
+        var root = _cs2Dir.Text.Trim();
+        if (root.Length == 0)
+            return;
+
+        try
+        {
+            var path = new Cs2Install(root).Tools.VpkSignatures;
+            if (VpkSignaturesGuard.RestoreLeftover(path))
+                AppendConsole($"Restored vpk.signatures left disabled by a previous run: {path}",
+                    Themer.CurrentThemeColors.ContrastSoft);
+        }
+        catch
+        {
+            // Best-effort recovery — a bad path or transient lock must not break startup.
+        }
     }
 
     /// <summary>
@@ -497,7 +523,7 @@ public sealed class MainForm : Form
             {
                 SetStatus("Fixing brush UV scale…");
                 await Task.Run(() => PostImportVmapTools.FixBrushUvScale(
-                    cs2, addon, project.S1ContentDir, LogFromWorker, _cts.Token), _cts.Token);
+                    cs2, addon, project.MapName, project.S1ContentDir, LogFromWorker, _cts.Token), _cts.Token);
             }
 
             // Opt-in post-import .vmap edits, before stats/validation so those reflect the final map.
@@ -552,6 +578,11 @@ public sealed class MainForm : Form
             {
                 SetStatus("Collapsing prefabs…");
                 await Task.Run(() => PostImportVmapTools.CollapsePrefabs(cs2, addon, mapName, LogFromWorker, ct), ct);
+
+                // Collapsing merges sub-map nodes into the root map, leaving single-child group
+                // wrappers behind — flatten them automatically as part of the same step.
+                SetStatus("Flattening single-child groups…");
+                await Task.Run(() => PostImportVmapTools.FlattenSingleChildGroups(cs2, addon, LogFromWorker, ct), ct);
             }
 
             if (_skyboxTemplate.Checked)

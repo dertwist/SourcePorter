@@ -10,8 +10,10 @@ using SourcePorter.Core.Vmap;
 //   batch    <cs2dir> <mapsDir> [--limit N] [--no-bsp] [--no-unpack] [--compile] [--no-compile-assets] [--collapse-prefabs] [--skybox-template] [--repair] [--verbose]
 //
 // --collapse-prefabs: after importing, merge the map's prefab/sub-map references into the
-// root .vmap (the sub-map files are kept). --skybox-template: scaffold a 3D-skybox setup
-// (a separate <map>_sky.vmap flagged skybox + a skybox_reference at 0 0 0). See PostImportVmapTools.
+// root .vmap (the sub-map files are kept), then flatten the redundant single-child/empty
+// CMapGroup wrappers it leaves behind (shrinks the .vmap). --skybox-template: scaffold a
+// 3D-skybox setup (a separate <map>_sky.vmap flagged skybox + a skybox_reference at 0 0 0).
+// See PostImportVmapTools.
 //
 // --repair: after validating, re-import the materials/models the importer missed
 // (a model's gib/breakpiece children, a skybox material from a lighting prefab, …),
@@ -109,11 +111,15 @@ static async Task<int> Port(string cs2Dir, string sourceMap, string addon, bool 
     // 16x16-default scale because it can't read their .vtf). On by default for BSP imports; the
     // staged content holds only the BSP's custom materials, so stock faces are never touched.
     if (bspImported && !noUvFix)
-        PostImportVmapTools.FixBrushUvScale(cs2, addon, project.S1ContentDir, Console.WriteLine);
+        PostImportVmapTools.FixBrushUvScale(cs2, addon, project.MapName, project.S1ContentDir, Console.WriteLine);
 
     // Opt-in post-import .vmap edits, before the compile so a --compile picks them up.
     if (collapse)
+    {
         PostImportVmapTools.CollapsePrefabs(cs2, addon, project.MapName, Console.WriteLine);
+        // Collapsing leaves single-child group wrappers behind — flatten them automatically.
+        PostImportVmapTools.FlattenSingleChildGroups(cs2, addon, Console.WriteLine);
+    }
     if (skybox)
         PostImportVmapTools.CreateSkyboxTemplate(cs2, addon, project.MapName, Console.WriteLine);
 

@@ -188,9 +188,175 @@ public class VmapToolsTests
         finally { Directory.Delete(installRoot, recursive: true); }
     }
 
+    // ---- Flatten single-child groups ----
+
+    [Fact]
+    public void Flatten_collapses_single_child_group_keeping_position()
+    {
+        var root = NewTempDir();
+        try
+        {
+            var mainPath = Path.Combine(root, "maps", "m.vmap");
+            WriteMap(mainPath, (dm, kids) =>
+            {
+                kids.Add(El(dm, "CMapEntity"));
+                kids.Add(Grp(dm, El(dm, "CMapMesh")));   // single-child group
+                kids.Add(El(dm, "CMapEntity"));
+            });
+
+            var doc = VmapDocument.Load(mainPath);
+            var (flattened, empty) = VmapGroupFlattener.Flatten(doc);
+            doc.Save();
+
+            Assert.Equal(1, flattened);
+            Assert.Equal(0, empty);
+
+            var reloaded = VmapDocument.Load(mainPath);
+            Assert.Equal(3, reloaded.WorldChildren.Count);
+            Assert.DoesNotContain(reloaded.WorldChildren, n => n.ClassName == "CMapGroup");
+            Assert.Equal("CMapMesh", reloaded.WorldChildren[1].ClassName); // child kept the group's slot
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void Flatten_removes_empty_group()
+    {
+        var root = NewTempDir();
+        try
+        {
+            var mainPath = Path.Combine(root, "maps", "m.vmap");
+            WriteMap(mainPath, (dm, kids) =>
+            {
+                kids.Add(El(dm, "CMapEntity"));
+                kids.Add(Grp(dm));   // empty group
+            });
+
+            var doc = VmapDocument.Load(mainPath);
+            var (flattened, empty) = VmapGroupFlattener.Flatten(doc);
+            doc.Save();
+
+            Assert.Equal(0, flattened);
+            Assert.Equal(1, empty);
+
+            var reloaded = VmapDocument.Load(mainPath);
+            Assert.Single(reloaded.WorldChildren);
+            Assert.Equal("CMapEntity", reloaded.WorldChildren[0].ClassName);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void Flatten_preserves_multi_child_group()
+    {
+        var root = NewTempDir();
+        try
+        {
+            var mainPath = Path.Combine(root, "maps", "m.vmap");
+            WriteMap(mainPath, (dm, kids) =>
+                kids.Add(Grp(dm, El(dm, "CMapMesh"), El(dm, "CMapEntity"))));
+
+            var doc = VmapDocument.Load(mainPath);
+            var (flattened, empty) = VmapGroupFlattener.Flatten(doc);
+
+            Assert.Equal(0, flattened);
+            Assert.Equal(0, empty);
+            Assert.Single(doc.WorldChildren);
+            Assert.Equal("CMapGroup", doc.WorldChildren[0].ClassName);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void Flatten_preserves_group_with_nonidentity_transform()
+    {
+        var root = NewTempDir();
+        try
+        {
+            var mainPath = Path.Combine(root, "maps", "m.vmap");
+            WriteMap(mainPath, (dm, kids) =>
+            {
+                var g = Grp(dm, El(dm, "CMapMesh"));
+                g["origin"] = new Vector3(64, 0, 0); // moving the group would move its child
+                kids.Add(g);
+            });
+
+            var doc = VmapDocument.Load(mainPath);
+            var (flattened, _) = VmapGroupFlattener.Flatten(doc);
+
+            Assert.Equal(0, flattened);
+            Assert.Equal("CMapGroup", doc.WorldChildren[0].ClassName);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void Flatten_collapses_nested_single_child_groups()
+    {
+        var root = NewTempDir();
+        try
+        {
+            var mainPath = Path.Combine(root, "maps", "m.vmap");
+            WriteMap(mainPath, (dm, kids) =>
+                kids.Add(Grp(dm, Grp(dm, Grp(dm, El(dm, "CMapMesh")))))); // group→group→group→mesh
+
+            var doc = VmapDocument.Load(mainPath);
+            var (flattened, _) = VmapGroupFlattener.Flatten(doc);
+
+            Assert.Equal(3, flattened);
+            Assert.Single(doc.WorldChildren);
+            Assert.Equal("CMapMesh", doc.WorldChildren[0].ClassName);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void Flatten_preserves_worldlayer_and_instance_targets()
+    {
+        var root = NewTempDir();
+        try
+        {
+            var mainPath = Path.Combine(root, "maps", "m.vmap");
+            WriteMap(mainPath, (dm, kids) =>
+            {
+                // CMapWorldLayer is a structural subclass, not a plain group — never collapse it.
+                var layer = El(dm, "CMapWorldLayer");
+                var layerKids = new ElementArray { El(dm, "CMapMesh") };
+                layer["children"] = layerKids;
+                kids.Add(layer);
+
+                // A group that is a CMapInstance target must survive (removing it breaks the instance).
+                var target = Grp(dm, El(dm, "CMapMesh"));
+                var inst = El(dm, "CMapInstance");
+                inst["target"] = target;
+                kids.Add(target);
+                kids.Add(inst);
+            });
+
+            var doc = VmapDocument.Load(mainPath);
+            var (flattened, empty) = VmapGroupFlattener.Flatten(doc);
+
+            Assert.Equal(0, flattened);
+            Assert.Equal(0, empty);
+            Assert.Contains(doc.WorldChildren, n => n.ClassName == "CMapWorldLayer");
+            Assert.Contains(doc.WorldChildren, n => n.ClassName == "CMapGroup");
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     // ---- helpers ----
 
     private static Element El(DM dm, string className) => new(dm, "", null, className);
+
+    /// <summary>A <c>CMapGroup</c> whose <c>children</c> are the given nodes.</summary>
+    private static Element Grp(DM dm, params Element[] children)
+    {
+        var g = El(dm, "CMapGroup");
+        var arr = new ElementArray();
+        foreach (var c in children) arr.Add(c);
+        g["children"] = arr;
+        return g;
+    }
 
     private static string? Classname(Element node) =>
         node.ContainsKey("entity_properties") && node["entity_properties"] is Element props

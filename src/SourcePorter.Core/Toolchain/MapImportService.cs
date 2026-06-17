@@ -105,9 +105,8 @@ public sealed partial class MapImportService
 
         // Guide §-1.1: disable vpk.signatures for the run (restored on dispose) so
         // source1import can read the CS:GO pak01.vpk.
-        using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures);
-        if (signatures.Applied)
-            Emit("Disabled vpk.signatures for this import (guide -1.1); will restore afterwards.");
+        using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures, Emit);
+        ReportSignatures(signatures, "import");
 
         // Terrain fix: -usebsp makes source1import shell out to vbsp to clean up the
         // geometry (displacements/terrain), but it passes the content path to vbsp
@@ -193,6 +192,29 @@ public sealed partial class MapImportService
     }
 
     /// <summary>
+    /// Reports the outcome of the <c>vpk.signatures</c> workaround (guide §-1.1). A locked
+    /// file is a <b>warning, not a hard failure</b>: the import continues and source1import
+    /// surfaces its own <c>pak01.vpk</c> read error if the workaround was truly needed —
+    /// instead of aborting up front with a cryptic "the process cannot access the file"
+    /// message. <paramref name="context"/> names the pass (import / repair pass / compile).
+    /// </summary>
+    private void ReportSignatures(VpkSignaturesGuard signatures, string context)
+    {
+        switch (signatures.State)
+        {
+            case VpkSignaturesState.Disabled:
+                Emit($"Disabled vpk.signatures for this {context} (guide -1.1); will restore afterwards.");
+                break;
+            case VpkSignaturesState.Locked:
+                Emit("WARNING: couldn't disable vpk.signatures — it's held open by another process " +
+                     "(most likely CS2 or the Source 2 tools are running). Close CS2 and any open " +
+                     "Hammer/Workshop tools, then re-import. Continuing anyway, but source1import may " +
+                     "fail to read pak01.vpk while it's locked.");
+                break;
+        }
+    }
+
+    /// <summary>
     /// Returns a space-free form of <paramref name="contentDir"/> for the
     /// <c>-usebsp</c> path (see <see cref="ShortPath"/>). Falls back to the original
     /// path (with a warning) when no 8.3 short name is available, in which case the
@@ -273,9 +295,8 @@ public sealed partial class MapImportService
         {
             var env = new Dictionary<string, string> { ["VALVE_NO_AUTO_P4"] = "1" };
 
-            using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures);
-            if (signatures.Applied)
-                Emit("Disabled vpk.signatures for this repair pass (guide -1.1); will restore afterwards.");
+            using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures, Emit);
+            ReportSignatures(signatures, "repair pass");
 
             var paths = new ImportPaths(project.S2GameInfoDir, project.AddonName, project.MapName);
             var mapsDir = Path.Combine(paths.S2ContentCsgoImported, "maps");
@@ -325,8 +346,9 @@ public sealed partial class MapImportService
     /// </summary>
     public async Task<bool> CompileMapAsync(PortProject project, CancellationToken ct = default)
     {
-        using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures);
         _compactor = project.Import.CompactLog ? new LogCompactor() : null;
+        using var signatures = new VpkSignaturesGuard(_tools.VpkSignatures, Emit);
+        ReportSignatures(signatures, "compile");
         var paths = new ImportPaths(project.S2GameInfoDir, project.AddonName, project.MapName);
         var vmap = paths.ContentMainVmap;
         if (!File.Exists(vmap))

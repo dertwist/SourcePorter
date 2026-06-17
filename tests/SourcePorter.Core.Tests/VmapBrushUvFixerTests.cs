@@ -1,137 +1,61 @@
-using System.Collections;
-using System.Collections.Generic;
 using System.Numerics;
-using Datamodel;
 using SourcePorter.Core.Vmap;
 using Xunit;
 
 namespace SourcePorter.Core.Tests;
 
 /// <summary>
-/// Validates <see cref="VmapBrushUvFixer"/> against a Hammer-corrected ground-truth <c>.vmap</c>
-/// (<c>ported_fixed.vmap</c> — the user nudged + reverted UVs in Source 2 Hammer, which re-baked
-/// the correct texcoords). Skipped in CI (the real files are git-ignored / machine-specific).
+/// Pins the brush-UV recompute math against <b>Hammer's own ground truth</b>: the user nudged +
+/// reverted UVs on a <c>blend_roofing_tile_01</c> face in Source 2 Hammer (which re-bakes the
+/// correct texcoords) and saved <c>ported_fixed.vmap</c>; these are the exact values it produced.
+/// Self-contained (no fixtures), so it guards the formula forever.
 /// </summary>
 public class VmapBrushUvFixerTests
 {
-    private const string Fixed =
-        @"E:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\content\csgo_addons\de_gracia_test\maps\ported_fixed.vmap";
-    private const string StagedContent =
-        @"C:\Users\admin\AppData\Local\Temp\SourcePorter\de_gracia\de_gracia";
+    [Theory]
+    // pos                       expected u      expected v   (exact values Hammer re-baked, 1024px)
+    [InlineData(300f, 0f, 31f, 0.18705384f, -1.2994702f)]
+    [InlineData(300f, 147f, -29f, -1.0534085f, -1.2994702f)]
+    public void RecomputeTexcoord_matches_hammers_rebaked_values(
+        float px, float py, float pz, float expectedU, float expectedV)
+    {
+        // The exact per-face mapping Hammer stored for the corrected blend_roofing_tile_01 face.
+        var axisU = new Vector4(0f, -0.92584765f, 0.377897f, 97.82129f);
+        var axisV = new Vector4(-1f, 0f, 0f, 884.99976f);
+        const float scaleU = 0.12499547f, scaleV = 0.13540001f, dim = 1024f;
 
-    // The user-corrected material whose faces Hammer re-baked (1024px basetexture).
-    private const string GroundTruthMat = "blend_roofing_tile_01";
-    private const float RealDim = 1024f;
+        var uv = VmapBrushUvFixer.RecomputeTexcoord(
+            new Vector3(px, py, pz), axisU, axisV, scaleU, scaleV, dim, dim);
+
+        Assert.True(Math.Abs(uv.X - expectedU) < 5e-4f, $"u {uv.X} vs {expectedU}");
+        Assert.True(Math.Abs(uv.Y - expectedV) < 5e-4f, $"v {uv.Y} vs {expectedV}");
+    }
 
     [Fact]
-    public void Recomputes_texcoords_to_match_hammer_ground_truth()
+    public void MapVmaps_returns_only_the_imported_maps_own_files()
     {
-        if (!File.Exists(Fixed) || !Directory.Exists(StagedContent))
-            return; // fixtures absent (CI) — skip.
-
-        var work = Path.Combine(Path.GetTempPath(), "uvfix_" + Guid.NewGuid().ToString("N"), "maps");
-        Directory.CreateDirectory(work);
-        var test = Path.Combine(work, "test.vmap");
-        File.Copy(Fixed, test);
+        var root = Path.Combine(Path.GetTempPath(), "mvtest_" + Guid.NewGuid().ToString("N"));
+        var maps = Path.Combine(root, "maps");
+        var prefabs = Path.Combine(maps, "prefabs", "de_test");
+        Directory.CreateDirectory(prefabs);
         try
         {
-            // Ground truth = Hammer's correct texcoords for the corrected material's faces.
-            var groundTruth = CollectGroundTruthTexcoords(test);
-            Assert.NotEmpty(groundTruth);
+            File.WriteAllText(Path.Combine(maps, "de_test.vmap"), "x");                 // the main map
+            File.WriteAllText(Path.Combine(prefabs, "de_test_environment.vmap"), "x");  // its prefab
+            File.WriteAllText(Path.Combine(maps, "ported_raw.vmap"), "x");              // a user file — must be ignored
+            File.WriteAllText(Path.Combine(maps, "ported_fixed.vmap"), "x");            // a user file — must be ignored
 
-            // Simulate a fresh (broken) import: un-correct textureScale (× 16/realDim) and zero the
-            // texcoords of those faces. The fixer must restore both from the mapping alone.
-            CorruptGroundTruthFaces(test);
+            var got = VmapBrushUvFixer.MapVmaps(maps, "de_test").Select(Path.GetFileName).ToHashSet();
 
-            var result = VmapBrushUvFixer.FixAddon(work, StagedContent);
-            Assert.True(result.DidAnything);
-
-            var afterFix = CollectGroundTruthTexcoords(test);
-            Assert.Equal(groundTruth.Count, afterFix.Count);
-            for (var i = 0; i < groundTruth.Count; i++)
-            {
-                Assert.Equal(groundTruth[i].X, afterFix[i].X, 2);
-                Assert.Equal(groundTruth[i].Y, afterFix[i].Y, 2);
-            }
+            Assert.Equal(2, got.Count);
+            Assert.Contains("de_test.vmap", got);
+            Assert.Contains("de_test_environment.vmap", got);
+            Assert.DoesNotContain("ported_raw.vmap", got);
+            Assert.DoesNotContain("ported_fixed.vmap", got);
         }
         finally
         {
-            Directory.Delete(Path.GetDirectoryName(work)!, recursive: true);
+            Directory.Delete(root, recursive: true);
         }
     }
-
-    // --- helpers: walk the mesh graph and act on faces using the ground-truth material ---
-
-    private static List<Vector2> CollectGroundTruthTexcoords(string path)
-    {
-        var result = new List<Vector2>();
-        ForEachGroundTruthFace(VmapDocument.LoadInMemory(path), (texcoord, _, _, _, fvIndices) =>
-        {
-            foreach (var fv in fvIndices) result.Add(texcoord[fv]);
-        });
-        return result;
-    }
-
-    private static void CorruptGroundTruthFaces(string path)
-    {
-        var doc = VmapDocument.LoadInMemory(path);
-        ForEachGroundTruthFace(doc, (texcoord, texScale, faceIndex, scaleList, fvIndices) =>
-        {
-            var ts = scaleList[faceIndex];
-            scaleList[faceIndex] = new Vector2(ts.X * 16f / RealDim, ts.Y * 16f / RealDim);
-            foreach (var fv in fvIndices) texcoord[fv] = Vector2.Zero;
-        });
-        doc.Save();
-    }
-
-    private delegate void FaceAction(
-        IList<Vector2> texcoord, IList<Vector2> texScale, int faceIndex, IList<Vector2> scaleList, List<int> fvIndices);
-
-    private static void ForEachGroundTruthFace(VmapDocument doc, FaceAction action)
-    {
-        var seen = new HashSet<Element>();
-        void Walk(Element? e)
-        {
-            if (e is null || !seen.Add(e)) return;
-            if (e.ClassName == "CDmePolygonMesh") TryMesh(e, action);
-            foreach (var kv in e)
-            {
-                if (kv.Value is Element c) Walk(c);
-                else if (kv.Value is ElementArray a) foreach (var x in a) Walk(x);
-            }
-        }
-        Walk(doc.Model.Root);
-    }
-
-    private static void TryMesh(Element mesh, FaceAction action)
-    {
-        if (mesh["materials"] is not StringArray mats) return;
-        var fS = (ElementArray)((Element)mesh["faceData"]!)["streams"]!;
-        var matIndex = Data<int>(fS, "materialindex");
-        var texScale = Data<Vector2>(fS, "textureScale");
-        var texcoord = Data<Vector2>((ElementArray)((Element)mesh["faceVertexData"]!)["streams"]!, "texcoord");
-        if (matIndex is null || texScale is null || texcoord is null) return;
-        var faceEdge = Ints(mesh, "faceEdgeIndices");
-        var edgeNext = Ints(mesh, "edgeNextIndices");
-        var edgeVData = Ints(mesh, "edgeVertexDataIndices");
-
-        for (var f = 0; f < matIndex.Count; f++)
-        {
-            if ((mats[matIndex[f]] ?? "").Contains(GroundTruthMat) != true) continue;
-            var fvs = new List<int>();
-            int e0 = faceEdge[f], e = e0, g = 0;
-            do { fvs.Add(edgeVData[e]); e = edgeNext[e]; } while (e != e0 && ++g < 32);
-            action(texcoord, texScale, f, texScale, fvs);
-        }
-    }
-
-    private static IList<T>? Data<T>(ElementArray streams, string std)
-    {
-        foreach (var s in streams)
-            if (s != null && (s.ContainsKey("standardAttributeName") ? s["standardAttributeName"] as string : null) == std)
-                return s["data"] as IList<T>;
-        return null;
-    }
-    private static List<int> Ints(Element e, string key)
-    { var l = new List<int>(); if (e[key] is IEnumerable en) foreach (var i in en) l.Add(Convert.ToInt32(i)); return l; }
 }
