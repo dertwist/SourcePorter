@@ -119,9 +119,10 @@ public sealed partial class MapImportService
             s1Content = ResolveSpaceFreeContentDir(s1Content);
 
         // --- import vmf -> vmap (built once with the ORIGINAL map name, reused for the re-import) ---
-        // The -usebsp instance-merge pass can access-violate on some maps (after the .vmap is
-        // written but before the refs list) — RunMapImportAsync retries once without merging and
-        // returns the mode that worked, so the step-5 re-import below reuses it and doesn't recrash.
+        // source1import's -usebsp passes (instance merge, then vbsp geo cleanup) can each
+        // access-violate on some maps (after the .vmap is written but before the refs list).
+        // RunMapImportAsync degrades the BSP mode step by step (merge → no-merge → vmf-only) on
+        // that crash and returns the mode that imported, so the step-5 re-import reuses it.
         var bspMode = await RunMapImportAsync(
             s1Game, s1Content, addon, originalMapName, InitialBspMode(project.Import), env, ct);
         var importArgs = BuildMapImportArgs(s1Game, s1Content, addon, originalMapName, bspMode);
@@ -317,15 +318,37 @@ public sealed partial class MapImportService
         : BspMode.None;
 
     /// <summary>
-    /// True when a failed map import should be retried with instance-merging off.
-    /// source1import's <c>-usebsp</c> merge pass can access-violate after the <c>.vmap</c>
-    /// is written but before the refs list is; <c>-usebsp_nomergeinstances</c> skips that
-    /// pass (a flat/decompiled map has no instances to merge anyway). Only the merge mode is
-    /// worth retrying — <see cref="BspMode.NoMerge"/> has no safer fallback that keeps the
-    /// geometry, so its crashes stay fatal.
+    /// The next, less aggressive BSP mode to try when <paramref name="mode"/> crashes
+    /// source1import with an access violation, or null when there is nothing safer left.
+    /// The cascade is <c>UseBsp → NoMerge → None</c>:
+    /// <list type="bullet">
+    /// <item><c>-usebsp</c>'s instance-merge pass can access-violate (after the <c>.vmap</c>
+    /// is written, before the refs list) — <c>-usebsp_nomergeinstances</c> skips merging.</item>
+    /// <item><c>-usebsp</c>'s vbsp geometry-cleanup pass can <i>also</i> access-violate on some
+    /// maps (e.g. de_gracia) — dropping <c>-usebsp</c> entirely (vmf-only geo) avoids vbsp.
+    /// Terrain still imports because <see cref="VmfNormalizer.EnsureDisplacementOffsets"/>
+    /// repaired the displacements; only vbsp's brush-geo cleanup is lost.</item>
+    /// </list>
     /// </summary>
-    internal static bool ShouldRetryWithoutMerge(BspMode mode, int exitCode) =>
-        mode == BspMode.UseBsp && exitCode == AccessViolationExitCode;
+    internal static BspMode? NextFallback(BspMode mode) => mode switch
+    {
+        BspMode.UseBsp => BspMode.NoMerge,
+        BspMode.NoMerge => BspMode.None,
+        _ => null, // vmf-only already; no safer geometry mode remains
+    };
+
+    private static string FallbackMessage(BspMode to) => to switch
+    {
+        BspMode.NoMerge =>
+            "source1import crashed (access violation) in the -usebsp instance-merge pass — a known Valve " +
+            "tool crash. Retrying with -usebsp_nomergeinstances (skips instance merging; a flat/decompiled " +
+            "map has nothing to merge)…",
+        BspMode.None =>
+            "source1import crashed (access violation) in the vbsp geometry pass — retrying with vmf-only " +
+            "geometry (no -usebsp). Terrain is preserved by the displacement-offset repair; only vbsp's " +
+            "brush-geo cleanup is skipped.",
+        _ => "source1import crashed (access violation) — retrying…",
+    };
 
     internal static string BuildMapImportArgs(string s1Game, string s1Content, string addon, string mapName, BspMode bsp)
     {
@@ -340,29 +363,30 @@ public sealed partial class MapImportService
 
     /// <summary>
     /// Runs the main map import, recovering from the known source1import <c>-usebsp</c>
-    /// crash: when merging is on and the tool dies with an access violation, retries once
-    /// with <c>-usebsp_nomergeinstances</c>. Returns the BSP mode that actually ran so the
-    /// later re-import reuses it; any other non-zero exit stays fatal (rethrown by RunAsync).
+    /// access-violation crashes by degrading the BSP mode one step at a time
+    /// (<see cref="NextFallback"/>): merge → no-merge → vmf-only. Returns the mode that
+    /// actually imported so the step-5 re-import reuses it. Any non-access-violation exit
+    /// (or a crash with no safer mode left) stays fatal (rethrown by RunAsync).
     /// </summary>
     private async Task<BspMode> RunMapImportAsync(
         string s1Game, string s1Content, string addon, string mapName,
         BspMode bspMode, IReadOnlyDictionary<string, string> env, CancellationToken ct)
     {
-        try
+        while (true)
         {
-            await RunAsync(_tools.Source1Import, "source1import.exe",
-                BuildMapImportArgs(s1Game, s1Content, addon, mapName, bspMode), env, ct);
-            return bspMode;
-        }
-        catch (ImportToolException ex)
-            when (ShouldRetryWithoutMerge(bspMode, ex.ExitCode) && !ct.IsCancellationRequested)
-        {
-            Emit("source1import crashed (access violation) in the -usebsp instance-merge pass — a known " +
-                 "Valve tool crash. Retrying once with -usebsp_nomergeinstances (skips instance merging; " +
-                 "a flat/decompiled map has nothing to merge)…");
-            await RunAsync(_tools.Source1Import, "source1import.exe",
-                BuildMapImportArgs(s1Game, s1Content, addon, mapName, BspMode.NoMerge), env, ct);
-            return BspMode.NoMerge;
+            try
+            {
+                await RunAsync(_tools.Source1Import, "source1import.exe",
+                    BuildMapImportArgs(s1Game, s1Content, addon, mapName, bspMode), env, ct);
+                return bspMode;
+            }
+            catch (ImportToolException ex)
+                when (ex.ExitCode == AccessViolationExitCode && !ct.IsCancellationRequested
+                      && NextFallback(bspMode) is { } next)
+            {
+                Emit(FallbackMessage(next));
+                bspMode = next;
+            }
         }
     }
 

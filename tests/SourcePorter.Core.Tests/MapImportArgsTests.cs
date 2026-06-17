@@ -48,17 +48,13 @@ public class MapImportArgsTests
     }
 
     [Fact]
-    public void ShouldRetryWithoutMerge_only_for_usebsp_access_violation()
+    public void NextFallback_degrades_geometry_mode_one_step()
     {
-        // -usebsp + access violation (0xC0000005) is the one case we retry without merging.
-        Assert.True(MapImportService.ShouldRetryWithoutMerge(MapImportService.BspMode.UseBsp, MapImportService.AccessViolationExitCode));
-
-        // A different exit code under -usebsp is a real failure, not the merge crash.
-        Assert.False(MapImportService.ShouldRetryWithoutMerge(MapImportService.BspMode.UseBsp, 1));
-
-        // No-merge / no-bsp have no safer fallback, so their crashes stay fatal.
-        Assert.False(MapImportService.ShouldRetryWithoutMerge(MapImportService.BspMode.NoMerge, MapImportService.AccessViolationExitCode));
-        Assert.False(MapImportService.ShouldRetryWithoutMerge(MapImportService.BspMode.None, MapImportService.AccessViolationExitCode));
+        // On an access violation the import retries with progressively less BSP processing:
+        // merge → no-merge → vmf-only → (give up).
+        Assert.Equal(MapImportService.BspMode.NoMerge, MapImportService.NextFallback(MapImportService.BspMode.UseBsp));
+        Assert.Equal(MapImportService.BspMode.None, MapImportService.NextFallback(MapImportService.BspMode.NoMerge));
+        Assert.Null(MapImportService.NextFallback(MapImportService.BspMode.None));
     }
 
     [Fact]

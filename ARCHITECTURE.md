@@ -153,18 +153,26 @@ match the Python.
   that dir ([`ShortPath`](src/SourcePorter.Core/Toolchain/ShortPath.cs), Win32
   `GetShortPathName`) so the path survives intact down to `vbsp`. If no 8.3 name exists
   (disabled on the volume) it warns instead of silently producing flat terrain.
-- **`-usebsp` instance-merge crash recovery.** On some maps `source1import`'s `-usebsp`
-  pass **access-violates** (`0xC0000005`, exit `-1073741819`) *after* the `.vmap` is
-  written but *before* the refs list — its instance-merge step crashes, so the dependency
-  import would find no refs. `RunMapImportAsync` detects that specific exit code
-  (`ImportToolException.ExitCode`, via `ShouldRetryWithoutMerge`) and retries the import
-  once with `-usebsp_nomergeinstances`, then reuses that mode for the step-5 re-import so
-  it doesn't recrash. A flat/decompiled map (every `func_instance` inlined by BSPSource)
-  has nothing to merge, so nothing is lost. Proactively, the GUI and CLI already route
-  **decompiled-BSP** input to `-usebsp_nomergeinstances` up front, so the common case never
-  hits the crash; the retry is the safety net for any other map that trips it. (Only the
-  merge mode is retried — plain `-usebsp_nomergeinstances`/no-bsp crashes stay fatal, as
-  there is no safer fallback that preserves the geometry.)
+- **`-usebsp` crash recovery (geometry-mode cascade).** On some maps `source1import`'s
+  `-usebsp` work **access-violates** (`0xC0000005`, exit `-1073741819`) *after* the `.vmap`
+  is written but *before* the refs list — so the dependency import would find no refs. There
+  are two distinct crash sites: the **instance-merge** step (e.g. de_grind) and the **vbsp
+  geometry-cleanup** step that reads back `-prepfors2`'s BSP (e.g. de_gracia). `RunMapImportAsync`
+  detects that exit code (`ImportToolException.ExitCode`) and degrades the BSP mode one step at
+  a time (`NextFallback`): **`-usebsp` (merge) → `-usebsp_nomergeinstances` (no merge) →
+  vmf-only (no `-usebsp`)**, reusing the mode that finally imports for the step-5 re-import so
+  it doesn't recrash. Dropping merge costs nothing on a flat/decompiled map (every
+  `func_instance` is inlined by BSPSource); dropping `-usebsp` entirely loses only vbsp's
+  brush-geo cleanup — **terrain still imports** because
+  [`VmfNormalizer.EnsureDisplacementOffsets`](src/SourcePorter.Core/Toolchain/VmfNormalizer.cs)
+  repaired the displacements. Proactively, the GUI and CLI route **decompiled-BSP** input to
+  `-usebsp_nomergeinstances` up front (skipping the merge crash), and the cascade is the safety
+  net for the vbsp-geo crash and any other map that trips it. Only a vmf-only crash (nothing
+  safer left) stays fatal. **Caveat:** `source1import` shells out to `./bin/vbsp.exe` *relative
+  to its cwd*, so vbsp only actually runs when the import_scripts cwd contains `bin/vbsp.exe`
+  (the CS2 install's `game\csgo\import_scripts` does; the app's bundled config copy does not).
+  This is why the GUI/CLI run with the **CS2 install's** import_scripts as cwd — otherwise
+  `-usebsp` silently no-ops to vmf-only geo.
 - **Console compaction ([`LogCompactor`](src/SourcePorter.Core/Toolchain/LogCompactor.cs),
   `ImportOptions.CompactLog`, default on).** The toolchain emits a whole block per asset
   (a VTF property dump, several `+- Wrote file …tga` lines, `ProcessTexture` notices,
