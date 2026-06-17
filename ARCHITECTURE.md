@@ -51,10 +51,14 @@ SourcePorter.sln
 │  │  │                          ImportPaths, MapImportService, BspDecompiler)
 │  │  ├─ Validation/            Asset validator: missing-file / read-error checks.
 │  │  │                         (Source2Resource, VpkIndex, GameInfo, AssetValidator)
-│  │  └─ Vmap/                   Post-import .vmap (DMX/KV3) tools via KeyValues2:
-│  │                            collapse prefabs + skybox template.
-│  │                            (VmapDocument, VmapPrefabCollapser, VmapSkyboxTemplate,
-│  │                             VmapBackup, PostImportVmapTools)
+│  │  ├─ Vmap/                   Post-import .vmap (DMX/KV3) tools via KeyValues2:
+│  │  │                         collapse prefabs + skybox template.
+│  │  │                         (VmapDocument, VmapPrefabCollapser, VmapSkyboxTemplate,
+│  │  │                          VmapBackup, PostImportVmapTools)
+│  │  └─ Materials/              Non-binary VMT→VMAT converter (port of kristiker/
+│  │                            source1import) + a VTF header reader for texture
+│  │                            dimensions. (VmtFile, VmtToVmatConverter, VmatDocument,
+│  │                             MaterialValues, ShaderMapping, VtfHeader, MaterialConverter)
 │  └─ SourcePorter.App/         WinForms front-end.
 │     ├─ Program.cs             Entry point + theme init.
 │     ├─ MainForm.cs            Importer shell: inputs + console + menu.
@@ -173,6 +177,42 @@ match the Python.
   (the CS2 install's `game\csgo\import_scripts` does; the app's bundled config copy does not).
   This is why the GUI/CLI run with the **CS2 install's** import_scripts as cwd — otherwise
   `-usebsp` silently no-ops to vmf-only geo.
+- **Importing BSP-packed custom content
+  ([`ImportGameInfo`](src/SourcePorter.Core/Toolchain/ImportGameInfo.cs)).** A decompiled `.bsp`'s
+  embedded `materials\`/`models\` are unpacked into the staged content root, but the dependency
+  phase originally only searched the CS:GO **game** dir, so the map's custom (e.g. `de_coastal\…`)
+  assets imported as **zero** — only stock ones. Two asymmetries in Valve's tools caused it:
+  `cs_mdl_import` resolves a model relative to its single `-i` root, and `source1import` imports a
+  material only from the **game** search path (it *finds* a custom `.vmt` via `-src1contentdir`
+  but resolves the `.vtf` via the game path and fails with a bare `*** Error Importing`). The fix
+  exposes the unpacked content to source1import as a *game* path: for a **staged** content root
+  (never the user's own folder — gated by `ImportGameInfo.IsStagedContentDir`), `PrepareDepsGameDir`
+  drops a custom `gameinfo.txt` there (so `|gameinfo_path|.` makes it a `Game` search path, with
+  `SteamAppId 730` + the real csgo dir keeping the base assets mounted) and uses it as the deps
+  `-src1gameinfodir`; the model pass picks `-i` per model (content root if the `.mdl` is there,
+  else CS:GO). source1import then prompts *"gameinfo.txt isn't in csgo … continue? ('y')"*, so the
+  deps imports feed `"y"` on stdin (`ProcessRunner` `standardInput` + `ConfirmIfNotCsgo`).
+  Verified end-to-end on de_gracia: 0 → 71 custom materials and 0 → 248 custom models imported,
+  un-imported deps 390 → 37. The same path is reused by the `MissingAssetImporter` repair.
+- **Custom brush-UV scale — fixed after import, not during (`Vmap/VmapBrushUvFixer`, §5).** A
+  decompiled BSP's custom brush materials (e.g. `de_coastal/*`) import with the wrong UV scale,
+  because source1import reads a material's texture dimensions (to convert Source 1 texel UVs to
+  Source 2) only from its **game** filesystem, and the map's custom `.vmt` live in the staged
+  content root, not on csgo's path (`GetMappingDimensionsForVMT: can't open …de_coastal/*.vmt`).
+  Two attempts to feed the dimensions *during* import via `-src1gameinfodir` both failed (see
+  [memory](../memory): source1import only resolves the input map / runs vbsp when the game dir is
+  the real csgo dir). So the main import always uses the real csgo dir and the scale is corrected
+  **deterministically afterwards** by [`VmapBrushUvFixer`](src/SourcePorter.Core/Vmap/VmapBrushUvFixer.cs):
+  source1import bakes every unreadable material's faces at a fixed **16×16-default** texture size,
+  so the fixer reads the real `.vtf` dimensions from the staged content, corrects each affected
+  face's `textureScale` (× `realDim/16`) and **recomputes** its baked `texcoord` from the corrected
+  mapping (the formula Hammer uses; see §5). It runs only for
+  BSP imports — where the staged content holds *only* the BSP's custom materials, so stock faces
+  (which source1import read correctly) are never touched. The **Import missing assets** repair
+  (Tools menu) **re-stages the current source map** when one is set
+  (`MainForm.StageCurrentSourceAsync`, shared with the import) so it can re-import custom BSP assets
+  too; genuinely sourceless assets (e.g. break-model children absent from the BSP unpack and the
+  CS:GO install) stay honestly reported as missing.
 - **Console compaction ([`LogCompactor`](src/SourcePorter.Core/Toolchain/LogCompactor.cs),
   `ImportOptions.CompactLog`, default on).** The toolchain emits a whole block per asset
   (a VTF property dump, several `+- Wrote file …tga` lines, `ProcessTexture` notices,
@@ -210,9 +250,17 @@ match the Python.
   JRE — no system Java needed); `ResolveExe` finds it next to the app. BSPSource
   exits 0 even on a per-file failure, so the missing-output check — not the exit
   code — is the real gate. See §4b for how that exe is built. After decompile it
-  runs `VmfNormalizer.EnsureImportableHeader` (below) and, when requested,
-  `--unpack_embedded` extracts the BSP's packed materials/models so the addon is
-  self-contained (returned via `BspDecompileResult.UnpackDir`).
+  runs `VmfNormalizer.EnsureImportableHeader` (below) and, when requested, extracts
+  the BSP's embedded content so the addon is self-contained (returned via
+  `BspDecompileResult.UnpackDir`).
+- **Full BSP unpack (`BspPakfile`).** SourcePorter does **not** use BSPSource's
+  `--unpack_embedded`: its "smart" unpack drops vbsp-generated materials — notably the
+  `materials/maps/<map>/…_wvt_patch.vmt` worldvertextransition patches the map's brush faces
+  actually reference. Instead `BspDecompiler` reads the BSP's pakfile lump directly
+  ([`BspPakfile`](src/SourcePorter.Core/Toolchain/BspPakfile.cs), LUMP_PAKFILE = a ZIP) and
+  `ExtractAll` writes **every** packed file to the unpack dir. Verified on de_gracia: 6264 embedded
+  files (316 `.vmt`, 542 `.vtf`) extracted in full, vs the subset BSPSource's filtered unpack wrote.
+  The same reader powers the missing-asset repair's BSP-embedded source search (§7a).
 - [`VmfNormalizer`](src/SourcePorter.Core/Toolchain/VmfNormalizer.cs) — minimal,
   lossless `.vmf` fix-ups that make a decompiled map importable **without** the
   manual "open and re-save in Hammer" step. A decompiled `.vmf` starts straight at
@@ -358,9 +406,97 @@ is set (orchestrated by the GUI/CLI like the validator, via the
 
 Both back up the main `.vmap` before overwriting it (`VmapBackup`, §11).
 
+A third tool runs **automatically after a BSP import** (not a checkbox — it's a correctness fix,
+like validation):
+
+- [`VmapBrushUvFixer`](src/SourcePorter.Core/Vmap/VmapBrushUvFixer.cs) — **Brush UV scale fix**:
+  walks every `.vmap` in the addon (main + prefab sub-maps) and corrects the UV mapping of brush
+  faces whose material source1import couldn't read. Those `CDmePolygonMesh` faces are baked at a
+  fixed **16×16** texture size (source1import's fallback when `GetMappingDimensionsForVMT` fails),
+  so the fixer reads the real `.vtf` dimensions from the staged content (`VmtFile` → `$basetexture`
+  → `VtfHeader`) and, per face: (1) corrects `textureScale` back to the true S1 scale (× `realDim/16`),
+  then (2) **recomputes** each corner's baked `texcoord` from the corrected mapping the same way
+  Hammer does — `u = (dot(P, axisU.xyz)/scale.u + axisU.w)/textureWidth`, `v` likewise (`P` = vertex
+  position via the half-edge streams). The texcoord is *recomputed, not scaled*: the renderer uses
+  the baked texcoords directly, and the per-face offset (`axis.w/dim`) and slope (`1/(scale·dim)`)
+  transform differently, so scaling the 16-default texcoords cannot reproduce the right value.
+  **Confirmed against a Hammer-corrected `.vmap`** (the user nudged + reverted UVs so Hammer re-baked
+  them): the formula reproduces Hammer's texcoords exactly (`blend_roofing_tile_01`,
+  `(11.7148/0.125 + 97.82)/1024 = 0.18705`). Only materials whose `.vtf` is in the staged content
+  are touched — i.e. exactly the BSP's custom materials — so stock faces are never affected. The
+  texture axes are already correct (dimension-independent) and left as-is. Loads each map via
+  `VmapDocument.LoadInMemory` (binary DMX `.vmap`s load deferred and would lock the file otherwise),
+  backs up before overwriting, and guards against double-application with a `<vmap>.spuvfix` sidecar
+  marker (the `textureScale` step isn't idempotent; a re-import rewrites the `.vmap` newer than the
+  marker so the fix re-runs on fresh data). GUI: runs automatically for BSP imports; CLI:
+  `--no-uv-fix` to opt out.
+
 **Still planned** here: the guide's entity/PostImport fix-ups (remove `(null)`
 params, rewrite classnames, add outputs, delete origin meshes — see §6). Compiled
 `.vmap_c`/`.vpk` artifacts remain read-only inputs for the asset audit.
+
+### 5a. Non-binary material conversion (`Materials/`) — implemented
+
+A **C# port of the VMT→VMAT parameter mapping** from
+[kristiker/source1import](https://github.com/kristiker/source1import) (MIT) — a standalone
+Python reimplementation of Valve's importer. The point is a material path that does **not**
+shell out to `source1import.exe`: it gives the missing-asset repair (§7a) a binary-free option
+and is the basis for fixing the custom brush-material scale the toolchain defaults (§4, "Custom-
+material scale" limitation).
+
+- [`VmtFile`](src/SourcePorter.Core/Materials/VmtFile.cs) — parses a Source 1 `.vmt` (KV1, via
+  `ValveKeyValue`) into a case-insensitive scalar bag, with the same normalisations as the Python
+  `VMT` class (`$bumpmap`→`$normalmap`, `sdk_`/`_dx9`/`_hdr` shader-name stripping, `%compileclip`
+  expansion, and `patch` resolution: load `include`, apply `replace`/`insert`).
+- [`ShaderMapping`](src/SourcePorter.Core/Materials/ShaderMapping.cs) — `shaderDict` +
+  `chooseShader()` with **every build-branch conditional collapsed to SourcePorter's target**
+  (CS2 with `CSGO_EXPORT_TOUCHSTONE`, i.e. the Source-1-ported `csgo_*` shaders that match what
+  Valve's own `source1import` emits — `csgo_lightmappedgeneric`, `csgo_vertexlitgeneric`, …).
+- [`VmtToVmatConverter`](src/SourcePorter.Core/Materials/VmtToVmatConverter.cs) — the
+  `vmt_to_vmat_pre()` tables + `convertVmtToVmat()` loop. Ported faithfully: the `features`,
+  `textures`, `transform` (the scale/offset that drives **correct UV scaling**), `settings`, and
+  `SystemAttributes` groups, with the value transforms (`fixVector`, `float_val`, `bool_val`,
+  `mapped_val`, `uniform_vec2`, the `TexTransform` legacy-matrix parser) in
+  [`MaterialValues`](src/SourcePorter.Core/Materials/MaterialValues.cs). Output is built by
+  [`VmatDocument`](src/SourcePorter.Core/Materials/VmatDocument.cs) (a `Layer0 { }` block).
+  **Known limitation:** the `channeled_masks` group (extracting one channel of a texture into a new
+  image — e.g. roughness from base-color alpha) needs per-pixel work and is **not** ported; those
+  entries are skipped rather than emitting a wrong whole-texture reference. Texture-group masks that
+  already point at a separate mask texture (`$envmapmask`, `$ao`, `$phongmask`, …) **are** emitted.
+  Normal maps are flagged `legacy_source1_inverted_normal` rather than re-encoding pixels.
+- [`VtfHeader`](src/SourcePorter.Core/Materials/VtfHeader.cs) — a tiny `.vtf` header reader that
+  recovers a texture's pixel **dimensions** without decoding the image body. This is the building
+  block for correcting custom brush-material scale: Valve's `source1import` defaults the mapping
+  size when it can't open a custom `.vmt`/`.vtf` (`GetMappingDimensionsForVMT: can't open …`);
+  reading the real dimensions with no binary lets a future `.vmap` UV-rescale pass use the true
+  size. (The converter itself is content-agnostic; the .vmap geometry rescale that consumes these
+  dimensions is not yet built.)
+- [`MaterialConverter`](src/SourcePorter.Core/Materials/MaterialConverter.cs) — file-level façade
+  (`.vmt` path → `.vmat` text/file, with content-root include resolution and base-texture
+  dimension lookup).
+- [`ErrorVmatRemapper`](src/SourcePorter.Core/Materials/ErrorVmatRemapper.cs) — repairs `.vmat`
+  files Valve's `source1import` left as `shader "error.vfx"` (it does that for shaders it can't map,
+  e.g. `Water`). Those files embed the original material verbatim in a `legacy_import { }` block, so
+  the remapper re-runs the converter over that embedded VMT to get the correct shader
+  (`csgo_water`, …) and parameters, preserving the `legacy_import` block. No toolchain, and no need
+  to locate the source `.vmt` — it's already in the file. Runs automatically after every import
+  (before validation) and in the missing-asset repair.
+
+**Tool-material detection is path-based** (ported faithfully from `is_tool_material`): a material is
+a tool material only when it lives under `materials/tools/` with a `tools*` filename
+(`VmtFile.IsToolMaterialPath`). It is **not** "has a `%compile*` key" — real surfaces like water
+carry `%compilewater`/`%tooltexture` yet must map to `csgo_water`, not the `generic` tools shader.
+
+**Relationship to the binary repair path.** The toolchain (`source1import.exe`/`cs_mdl_import.exe`)
+remains the **primary** importer in the §7a repair, because it also transcodes the `.vtf` textures to
+`.tga` — something this module does **not** do (it only reads VTF *headers*, not pixels). The
+`Materials/` converter is therefore the **non-binary complement**: it produces correct `.vmat`
+metadata (shaders, flags, UV scale/offset, surface props) without a CS2 toolchain, and `VtfHeader`
+supplies the true texture dimensions that Valve's tools default when they can't open a custom
+`.vmt`/`.vtf`. The brush-material UV-scale fix currently shipped via the csgo-named junction over the
+staged content (§4) stays the production path; this converter is the foundation for a future fully
+non-binary import/repair (it would need a VTF→TGA transcoder — e.g. bundling `vtf2tga` like BSPSource
+in §4b — before it can stand alone).
 
 ---
 
@@ -464,7 +600,48 @@ material filelist `source1import`, the `F_FORCE_UV2` 2-UV fix, optional
 to a fixpoint**, because a freshly-imported model can reveal its own missing children.
 An `attempted` set ensures each source is tried once (an asset with no S1 source stays
 missing and is reported honestly, never faked); that also bounds the loop, with a
-`maxRounds` cap as backstop. It is a **manual, on-demand step**, not part of the import:
+`maxRounds` cap as backstop.
+
+**Source search (CS:GO VPKs + custom content + BSP embedded).** Before firing the toolchain at a
+mapped source, the repair confirms the file actually exists via
+[`S1SourceLocator`](src/SourcePorter.Core/Toolchain/S1SourceLocator.cs), which searches the stock
+CS:GO `*_dir.vpk` archives (mounted with `ValvePak` via the shared `VpkIndex`) **and** the map's
+**custom content**: the staged content root (a decompiled BSP's unpacked `materials\`/`models\`),
+any extra content folders (e.g. the original `.bsp`'s own directory), and the original `.bsp`'s
+**embedded pakfile read directly** ([`BspPakfile`](src/SourcePorter.Core/Toolchain/BspPakfile.cs) —
+LUMP_PAKFILE, a ZIP) so a file BSPSource didn't unpack is still found. A custom asset that exists
+**only** in the BSP pakfile (not loose on disk) is **extracted into the staged content root** first
+— the `.mdl` with its `.vvd`/`.vtx`/`.phy` siblings, the `.vmt` with the `.vtf` textures it
+references — so `cs_mdl_import`/`source1import` (which read from disk) can consume it. Custom content
+wins over stock (a map's own `de_coastal\…` overrides the base game), matching Valve's search-path
+resolution. Only sources that resolve are imported; the
+repair tallies how many came from VPKs vs custom content (`SourcedFromCsgoVpk` /
+`SourcedFromCustomContent`) and collects the genuinely-sourceless ones in `Unsourced` — reported
+honestly rather than firing the tools at files that don't exist (which would just log
+`*** Error Importing`). This is also why the GUI re-stages the current source map for the repair
+(`MainForm.StageCurrentSourceAsync`): so `S1ContentDir` points at the same custom-content root the
+import used.
+
+**Per-group gameinfo routing.** Stock and custom sources must import through *different* gameinfo
+dirs, so the repair calls `ImportSpecificAssetsAsync` once per group: **stock** (CS:GO VPK) assets
+with `stockOnly: true` → the real `csgo` gameinfo dir, which is what mounts `pak01_dir.vpk`;
+**custom** (BSP-unpacked) assets → the staged content root's custom gameinfo (`PrepareDepsGameDir`).
+Routing stock assets through the staged custom gameinfo (as an earlier version did for *all* groups)
+makes `source1import` resolve nothing and log `*** Found no files matching specification …` — even
+though the `.vmt` exists in a mounted VPK. The `S1SourceLocator` classification is exactly what
+selects the right dir per asset.
+
+**Tool materials → non-binary fallback.** `source1import` **blacklists tool materials**
+(`tools/toolsclip_*`, …) and refuses to import them (`Removing blacklisted file from import …`,
+then `*** Found no files matching specifications`). So the repair pulls tool materials out of both
+source groups (`ExtractToolMaterials` — gated on a `materials/tools/` path or `%compile*` keys in the
+`.vmt`) and converts them with the **non-binary** [`MaterialConverter`](src/SourcePorter.Core/Materials/MaterialConverter.cs)
+(§5a) instead: it reads the `.vmt` straight from the VPK (`S1SourceLocator.TryReadText` →
+`VpkIndex.TryReadBytes`) and writes a correct, texture-free `generic.vfx` tools `.vmat` into the addon
+content tree (`MaterialsConvertedNonBinary`). This is the first production use of the `Materials/`
+converter, and the reason it doesn't need a VTF→TGA transcoder here — tool materials have no textures.
+
+It is a **manual, on-demand step**, not part of the import:
 the GUI exposes it under **Tools → Import missing assets** (validates the current
 CS2 directory + output addon, then repairs any `MissingImport` issues), and the CLI as
 the `--repair` flag (which runs after the post-import validation). It never runs
