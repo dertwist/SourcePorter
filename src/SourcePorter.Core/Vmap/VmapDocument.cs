@@ -75,6 +75,14 @@ public sealed class VmapDocument
     public static VmapDocument Load(string path) => new(DM.Load(path), path);
 
     /// <summary>
+    /// Loads a <c>.vmap</c> from an in-memory copy of the file so the file handle is <b>not</b>
+    /// held open — required when we mean to overwrite the same path (a binary DMX <see cref="DM.Load(string)"/>
+    /// keeps the file locked for deferred reads, so <see cref="Save"/> to the same path would fail).
+    /// </summary>
+    public static VmapDocument LoadInMemory(string path) =>
+        new(DM.Load(File.ReadAllBytes(path), Datamodel.Codecs.DeferredMode.Disabled), path);
+
+    /// <summary>
     /// Saves to <paramref name="path"/> (default: the load path) using the document's
     /// own encoding+version, so a text KeyValues2 map stays text and a binary map stays
     /// binary — i.e. the file keeps a form CS2/Hammer accept.

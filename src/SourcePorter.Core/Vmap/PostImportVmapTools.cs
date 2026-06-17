@@ -44,6 +44,18 @@ public static class PostImportVmapTools
         return result;
     }
 
+    /// <summary>
+    /// Corrects brush-face UV scale for custom (BSP-unpacked) materials across the addon's maps
+    /// (see <see cref="VmapBrushUvFixer"/>). Needs the staged content root to read the real texture
+    /// dimensions source1import couldn't.
+    /// </summary>
+    public static VmapBrushUvFixer.Result FixBrushUvScale(
+        Cs2Install cs2, string addon, string? stagedContentRoot, Action<string>? log = null, CancellationToken ct = default)
+    {
+        var mapsDir = Path.Combine(cs2.ContentAddonDir(addon), "maps");
+        return VmapBrushUvFixer.FixAddon(mapsDir, stagedContentRoot, log, ct);
+    }
+
     /// <summary>Scaffolds the 3D-skybox template for the map (see <see cref="VmapSkyboxTemplate"/>).</summary>
     public static VmapSkyboxTemplate.Result CreateSkyboxTemplate(
         Cs2Install cs2, string addon, string mapName, Action<string>? log = null, CancellationToken ct = default)
